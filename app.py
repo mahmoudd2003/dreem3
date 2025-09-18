@@ -10,6 +10,7 @@
 # - utils/style_diversity.py  (مؤشر تنوّع الأسلوب)
 # - utils/section_tools.py    (تحرير قسم محدد)
 # - utils/text_cleanup.py     (فلترة/تحسينات لغوية)
+# - utils/heading_tools.py    (Normalize Headings)
 # ===========================
 
 import streamlit as st
@@ -21,6 +22,7 @@ from utils.internal_links import parse_inventory, suggest_internal_links
 from utils.style_diversity import style_diversity_report
 from utils.section_tools import list_sections, extract_section_text, regenerate_section
 from utils.text_cleanup import clean_article
+from utils.heading_tools import normalize_headings
 
 # إعداد الصفحة
 st.set_page_config(
@@ -260,6 +262,48 @@ if st.session_state["result"]:
             st.markdown("**المقال بعد التنظيف:**")
             st.markdown(result["article"])
 
+    # ===== Normalize Headings =====
+    st.markdown("---")
+    st.subheader("🧭 Normalize Headings (تطبيع العناوين)")
+
+    col_h_a, col_h_b = st.columns(2)
+    with col_h_a:
+        opt_h1_to_h2 = st.checkbox("تحويل H1 إلى H2", value=True)
+        opt_h4_to_h3 = st.checkbox("إنزال H4+ إلى H3", value=True)
+        opt_space_after_hash = st.checkbox("توحيد المسافة بعد #", value=True)
+    with col_h_b:
+        opt_trim_punct = st.checkbox("إزالة ترقيم زائد بنهاية العنوان", value=True)
+        opt_collapse_spaces = st.checkbox("ضغط المسافات داخل العنوان", value=True)
+        opt_dedupe = st.checkbox("إزالة عناوين متتالية مكررة", value=True)
+
+    opt_autonumber = st.checkbox("ترقيم تلقائي للأقسام (H2/H3)", value=False)
+
+    if st.button("🧭 طبّق تطبيع العناوين"):
+        with st.spinner("تطبيق Normalize Headings..."):
+            nh = normalize_headings(
+                result["article"],
+                h1_to_h2=opt_h1_to_h2,
+                h4plus_to_h3=opt_h4_to_h3,
+                unify_space_after_hash=opt_space_after_hash,
+                trim_trailing_punct=opt_trim_punct,
+                collapse_spaces=opt_collapse_spaces,
+                remove_consecutive_duplicates=opt_dedupe,
+                autonumber=opt_autonumber,
+            )
+            result["article"] = nh["normalized"]
+            st.session_state["result"] = result
+
+            ch = nh["changes"]
+            st.success("تم تطبيع العناوين.")
+            st.write("**ملخص التغييرات:**")
+            st.write(
+                f"- H1→H2: {ch['h1_to_h2']} | H4+→H3: {ch['h4plus_to_h3']} | مسافة بعد #: {ch['space_after_hash_fixed']}\n"
+                f"- إزالة ترقيم نهائي: {ch['trimmed_trailing_punct']} | ضغط مسافات: {ch['collapsed_spaces']} | حذف مكرر: {ch['deduped_headings']}\n"
+                f"- ترقيم تلقائي: {ch['autonumbered']} | إجمالي العناوين: {ch['total_headings']}"
+            )
+            st.markdown("**المقال بعد التطبيع:**")
+            st.markdown(result["article"])
+
     # ===== اقتراح الروابط الداخلية =====
     inventory = parse_inventory(inventory_raw)
     if inventory:
@@ -348,4 +392,4 @@ if st.session_state["result"]:
                     except Exception as e:
                         st.error(f"تعذّرت إعادة توليد القسم: {e}")
 
-    st.success("✅ المقال جاهز — أنشئ، نظّف، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
+    st.success("✅ المقال جاهز — أنشئ، نظّف، طبّع العناوين، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
