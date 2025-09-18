@@ -1,95 +1,238 @@
 # utils/openai_client.py
-# ==========================================
-# عميل OpenAI + أدوات بناء المخرجات التحريرية
-# - chat_complete: استدعاء محادثة قياسي
-# - load_article_templates: تحميل قوالب الأقسام من YAML
-# - build_article_prompt: تركيب البرومبت من القوالب وخيارات الواجهة
-# - generate_article: توليد المقال (Markdown) + ملاحظات جودة + (Outline اختياري)
-# ملاحظات:
-# * يعتمد على متغيرات البيئة:
-#   - OPENAI_API_KEY
-#   - OPENAI_MODEL (اختياري) الافتراضي "gpt-4.1"
-# * تأكد من وجود PyYAML في requirements.txt
+# =====================================================
+# واجهة موحّدة للتعامل مع OpenAI (SDK الحديث openai>=1.30)
+# - chat_complete: نداء دردشة عام
+# - build_article_prompt: برومبت منضبط بعناصر النظام/المستخدم
+# - generate_article: توليد المقال (+ اختيار Outline) + توسيع تلقائي لضمان الطول
+# - expand_to_target: يعمّق المقال إن كان أقصر من الحد الأدنى
+# =====================================================
 
 from __future__ import annotations
-from typing import List, Dict, Any
-from pathlib import Path
+from typing import List, Dict, Any, Tuple
 import os
-import json
+import re
 
-# محاولة استيراد مكتبة OpenAI الحديثة
+# التحقق من المكتبة الحديثة
 try:
     from openai import OpenAI
-except Exception:
-    raise RuntimeError("لم يتم العثور على مكتبة OpenAI الحديثة. ثبّت: pip install openai --upgrade")
+except Exception as e:
+    raise RuntimeError(
+        "لم يتم العثور على مكتبة OpenAI الحديثة. ثبّت: pip install openai --upgrade"
+    )
 
-# YAML لتحميل القوالب
-try:
-    import yaml
-except Exception:
-    raise RuntimeError("مفقود PyYAML. ثبّت: pip install pyyaml")
+# ---------------------------------
+# إعداد العميل والنموذج الافتراضي
+# ---------------------------------
+if not os.getenv("OPENAI_API_KEY"):
+    # لا نوقف التنفيذ بقسوة، لكن سنفشل عند أول نداء فعلي
+    pass
 
-# تهيئة العميل
-_api_key = os.getenv("OPENAI_API_KEY")
-if not _api_key:
-    raise RuntimeError("لم يتم العثور على OPENAI_API_KEY في متغيرات البيئة.")
+client = OpenAI()
 
-_client = OpenAI(api_key=_api_key)
+# يمكنك ضبط اسم الموديل عبر متغير بيئة OPENAI_MODEL
+MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
-# اختيار النموذج
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1").strip()
+# ---------------------------------
+# خرائط الطول المستهدفة
+# ---------------------------------
+LENGTH_TARGETS: Dict[str, Tuple[int, int]] = {
+    "short":  (600,  800),
+    "medium": (900,  1200),
+    "long":   (1300, 1600),
+}
 
-# ------------------------------
-# واجهة مساعدة: Chat Completion
-# ------------------------------
+# ---------------------------------
+# أدوات مساعدة
+# ---------------------------------
+_WORD_RE = re.compile(r"[A-Za-z\u0600-\u06FF]+", re.UNICODE)
+
+def _word_count(text: str) -> int:
+    return len(_WORD_RE.findall(text or ""))
+
+def _safe_join_keywords(keywords: List[str]) -> str:
+    return ", ".join([k.strip() for k in keywords if k and k.strip()]) or "لا يوجد"
+
+# ---------------------------------
+# واجهة دردشة موحّدة
+# ---------------------------------
 def chat_complete(
+    *,
     messages: List[Dict[str, str]],
     temperature: float = 0.6,
-    max_output_tokens: int = 800,
+    max_output_tokens: int = 3800,
+    model: str = MODEL_NAME,
 ) -> str:
     """
-    استدعاء محادثة قياسي. يرجع نص المخرجات (content) كسلسلة.
-    messages = [{"role":"system/user/assistant","content":"..."}]
+    نداء موحّد لـ Chat Completions بالـ SDK الحديث.
+    انتبه: الحقل الصحيح هو max_output_tokens (وليس max_tokens).
     """
-    resp = _client.chat.completions.create(
-        model=MODEL,
+    resp = client.chat.completions.create(
+        model=model,
         messages=messages,
         temperature=temperature,
-        max_tokens=max_output_tokens,
+        max_output_tokens=max_output_tokens,
     )
-    # الحصول على أول مخرَج نصّي
-    choice = resp.choices[0]
-    content = choice.message.content or ""
-    return content.strip()
+    return resp.choices[0].message.content or ""
 
-# ------------------------------
-# تحميل القوالب من YAML (كاش)
-# ------------------------------
-_TPL_CACHE: Dict[str, Any] | None = None
-
-def load_article_templates() -> Dict[str, Any]:
-    global _TPL_CACHE
-    if _TPL_CACHE is not None:
-        return _TPL_CACHE
-    p = Path(__file__).parent / "article_templates.yaml"
-    if not p.exists():
-        raise RuntimeError(f"لم يتم العثور على ملف القوالب: {p}")
-    with p.open("r", encoding="utf-8") as f:
-        _TPL_CACHE = yaml.safe_load(f) or {}
-    return _TPL_CACHE
-
-def _bool_label(v: bool) -> str:
-    return "نعم" if v else "لا"
-
-# ------------------------------
-# بناء البرومبت من القوالب
-# ------------------------------
+# ---------------------------------
+# بناء برومبت المقال
+# ---------------------------------
 def build_article_prompt(
+    *,
     keyword: str,
     related_keywords: List[str],
     length_preset: str,
     tone: str,
+    include_outline: bool,
+    enable_editor_note: bool,
+    enable_not_applicable: bool,
+    enable_methodology: bool,
+    enable_sources: bool,
+    enable_scenarios: bool,
+    enable_faq: bool,
+    enable_comparison: bool,
+    scenarios_count: int,
+    faq_count: int,
+) -> Dict[str, Any]:
+    """
+    يرجع dict يحوي نصوص system/user وقائمة تحقق صريحة للتحكم بالطول والبنية.
+    """
+    length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
+    rk = _safe_join_keywords(related_keywords)
+
+    # صياغة أقسام المقال
+    # سنثبت عناوين H2 الأساسية، ونُفعّل الاختيارية حسب الإعداد.
+    sections = [
+        "## افتتاحية",
+        "## لماذا قد يظهر الرمز؟",
+    ]
+    if enable_not_applicable:
+        sections.append("## متى لا ينطبق التفسير؟")
+    if enable_scenarios:
+        sections.append("## سيناريوهات واقعية")
+    if enable_faq:
+        sections.append("## أسئلة شائعة")
+    if enable_comparison:
+        sections.append("## مقارنة دقيقة")
+    if enable_methodology:
+        sections.append("## منهجية التفسير")
+    if enable_sources:
+        sections.append("## مصادر صريحة")
+    if enable_editor_note:
+        sections.append("## تعليق محرّر")
+    sections.append("## خاتمة")
+
+    system = (
+        "أنت محرر عربي محترف يكتب مقالات تفسير أحلام بشرية الطابع.\n"
+        "التزم بالآتي بدقة:\n"
+        "- لغة بسيطة مباشرة، جمل قصيرة وفقرة مرتبة.\n"
+        "- صياغة احتمالية دائمًا (قد/يُحتمل/بحسب السياق)، ومنع الجزم والوعود/التنبؤات.\n"
+        "- تمييز الرأي المعاصر عن النقل التراثي عند ذكره.\n"
+        "- لا نصائح طبية/نفسية/مالية قاطعة. احترام الحساسية الدينية.\n"
+        "- تضمين تنويه مهني واضح في الخاتمة.\n"
+        "- لا حشو ولا تكرار.\n"
+    )
+
+    # قيود صريحة للطول والبنية
+    hard_constraints = [
+        f"- إجمالي الكلمات بين {length_min} و {length_max} كلمة.",
+        "- لا يقل كل قسم أساسي (افتتاحية/لماذا/خاتمة) عن 120–180 كلمة.",
+    ]
+    if enable_not_applicable:
+        hard_constraints.append("- قسم «متى لا ينطبق التفسير؟»: 3–5 نقاط واقعية لتقليل التعميم.")
+    if enable_scenarios:
+        hard_constraints.append(f"- سيناريوهات واقعية: {scenarios_count} عناصر، كل عنصر ≤ سطرين مع تعليق موجز.")
+    if enable_faq:
+        hard_constraints.append(f"- أسئلة شائعة: {faq_count} أسئلة، سؤال ≤ 12 كلمة، جواب ≤ 30 كلمة، تنسيق (**س:**/**ج:**).")
+    if enable_comparison:
+        hard_constraints.append("- مقارنة دقيقة: 2–3 فروق جوهرية بصياغة نقاط قصيرة.")
+    if enable_methodology:
+        hard_constraints.append("- منهجية التفسير: فقرة توضّح الجمع بين التراث + علم نفس الأحلام + سياق القارئ وحدود التفسير.")
+    if enable_sources:
+        hard_constraints.append("- مصادر صريحة: 3–6 مراجع؛ استخدم «بحاجة مراجعة بشرية» عند الشك.")
+    if enable_editor_note:
+        hard_constraints.append("- تعليق محرّر: خبرة تحريرية عامة بلا ادعاءات مهنية محمية.")
+
+    user = (
+        f"الكلمة المفتاحية: {keyword}\n"
+        f"الكلمات المرتبطة: {rk}\n"
+        f"النبرة المستهدفة: {tone}\n\n"
+        "اكتب مقالًا بصيغة Markdown بالعناوين التالية (H2) مرتّبة كما هي:\n"
+        + "\n".join(sections) + "\n\n"
+        "[قائمة تحقق صريحة — لا تُهملها]\n"
+        + "\n".join(hard_constraints) + "\n\n"
+        "تذكير مهم:\n"
+        "- اشرح «لماذا قد يظهر الرمز» نفسيًا/اجتماعيًا عند اللزوم.\n"
+        "- أدرج نصائح تهدئة ومتى أستشير مختصًا عند القلق.\n"
+        "- «ما الذي لا يعنيه الحلم؟» تُدمج ضمن الأقسام الملائمة لتبديد المعتقدات الشائعة.\n"
+        "- أدرج أمثلة واقعية مُقننة وFAQ قصير إذا كانت الأقسام مفعّلة.\n"
+        "- لا تضف مقدمة H1؛ العنوان الرئيسي سيكون خارج النص (لنضيفه من الميتا).\n"
+    )
+
+    return {
+        "system": system,
+        "user": user,
+        "sections": sections,
+        "length_min": length_min,
+        "length_max": length_max,
+    }
+
+# ---------------------------------
+# توسيع المقال إن كان أقصر من المطلوب
+# ---------------------------------
+def expand_to_target(
+    article_md: str,
     *,
+    keyword: str,
+    related_keywords: List[str],
+    length_preset: str,
+    model: str = MODEL_NAME,
+) -> str:
+    """
+    إن كان المقال أقصر من الحد الأدنى، نطلب من النموذج توسيع المحتوى
+    مع الحفاظ على البنية والعناوين.
+    """
+    length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
+    curr = _word_count(article_md)
+    if curr >= length_min:
+        return article_md
+
+    deficit = max(length_min - curr, 250)
+    system = (
+        "أنت محرر يعمّق المقال دون تغيير هيكله أو عناوينه.\n"
+        "وسّع كل قسم بمحتوى تطبيقي وأمثلة موجزة وأسئلة/إجابات قصيرة عند الحاجة، "
+        "مع الحفاظ على نفس العناوين وترتيبها وصياغة احتمالية، ومنع الحشو والجزم."
+    )
+    user = (
+        f"الكلمة المفتاحية: {keyword}\n"
+        f"الكلمات المرتبطة: {_safe_join_keywords(related_keywords)}\n"
+        f"المقال الحالي (Markdown):\n-----\n{article_md}\n-----\n"
+        f"المطلوب: زد المحتوى بنحو {deficit} كلمة على الأقل، "
+        f"مع الحفاظ على التنسيق والعناوين، وتجنّب الحشو والجزم، "
+        f"وابق ضمن سقف أقصى يقارب {length_max} كلمة قدر الإمكان."
+    )
+    addition = chat_complete(
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=0.55,
+        max_output_tokens=2200,
+        model=model,
+    )
+    new_article = addition.strip()
+    # أمان بسيط: إذا فشل النموذج في إعادة المقال كاملًا، نرجع القديم
+    if "## " not in new_article:
+        return article_md
+    return new_article
+
+# ---------------------------------
+# توليد المقال
+# ---------------------------------
+def generate_article(
+    *,
+    keyword: str,
+    related_keywords: List[str],
+    length_preset: str,      # "short" | "medium" | "long"
+    tone: str,               # "هادئة" | "قصصية" | "تحليلية"
+    include_outline: bool,
     enable_editor_note: bool,
     enable_not_applicable: bool,
     enable_methodology: bool,
@@ -99,109 +242,19 @@ def build_article_prompt(
     enable_comparison: bool,
     scenarios_count: int = 3,
     faq_count: int = 4,
-) -> str:
-    """
-    يركّب برومبت شامل يضم بنية المقال والأقسام المطلوبة،
-    ويُمرّر قوالب الصياغة كتعليمات للنموذج.
-    """
-    tpl = load_article_templates()
-
-    governance = (
-        "اكتب بالعربية البسيطة وبجمل قصيرة وفقرات منسّقة Markdown.\n"
-        "الصياغة احتمالية دائمًا (قد/يُحتمل/بحسب السياق). لا جزم ولا وعود/تنبؤات.\n"
-        "احترم الحساسية الدينية/الثقافية. لا نصائح طبية/نفسية/مالية قاطعة.\n"
-        "ميّز بين النقل الموثّق ورأي المحرّر. أدرج إخلاء مسؤولية في الخاتمة."
-    )
-
-    parts = [
-        f"## افتتاحية\n{tpl.get('intro','')}",
-        f"## لماذا قد يظهر الرمز؟\n{tpl.get('why_symbol_appears','')}",
-    ]
-
-    if enable_not_applicable:
-        parts.append(f"## متى لا ينطبق التفسير؟\n{tpl.get('not_applicable','')}")
-
-    if enable_scenarios:
-        parts.append(f"## سيناريوهات واقعية\n{tpl.get('scenarios_preamble','')}")
-
-    if enable_faq:
-        parts.append(f"## أسئلة شائعة\n{tpl.get('faq_preamble','')}")
-
-    if enable_comparison:
-        parts.append(f"## مقارنة دقيقة\n{tpl.get('comparison','')}")
-
-    if enable_methodology:
-        parts.append(f"## منهجية التفسير\n{tpl.get('methodology','')}")
-
-    if enable_sources:
-        parts.append(f"## مصادر صريحة\n{tpl.get('sources_preamble','')}")
-
-    if enable_editor_note:
-        parts.append(f"## تعليق محرّر\n{tpl.get('editor_note','')}")
-
-    parts.append(f"## خاتمة\n{tpl.get('outro','')}\n\n{tpl.get('disclaimer','')}")
-
-    summary = (
-        f"الكلمة المفتاحية: {keyword}\n"
-        f"الكلمات المرتبطة: {', '.join(related_keywords) if related_keywords else 'لا يوجد'}\n"
-        f"الطول المستهدف: {length_preset} (short/medium/long)\n"
-        f"النبرة: {tone}\n"
-        f"سيناريوهات: {_bool_label(enable_scenarios)} (عدد={scenarios_count})\n"
-        f"أسئلة شائعة: {_bool_label(enable_faq)} (عدد={faq_count})\n"
-        f"مقارنة: {_bool_label(enable_comparison)} | منهجية: {_bool_label(enable_methodology)} | مصادر: {_bool_label(enable_sources)}\n"
-        f"تعليق محرر: {_bool_label(enable_editor_note)}\n"
-        "التزم بالاحتمالية وعدم الجزم. ميّز النقل عن الرأي."
-    )
-
-    repeat_instructions = (
-        f"\n\nعند توليد السيناريوهات: أنشئ {scenarios_count} عناصر بصيغ ومشاعر مختلفة "
-        f"باستخدام القالب: {tpl.get('scenario_item','')}\n"
-        f"عند توليد الأسئلة الشائعة: أنشئ {faq_count} عناصر موجزة باستخدام القالب: {tpl.get('faq_item','')}\n"
-        "حافظ على حدود الطول لكل عنصر كما هو مذكور."
-    )
-
-    prompt = (
-        f"{governance}\n\n"
-        f"اكتب مقالًا عن: {keyword}\n"
-        f"ادمج الكلمة المفتاحية طبيعيًا في العنوان والافتتاحية دون حشو.\n\n"
-        f"{summary}\n\n"
-        f"**بنية المقال (Markdown):**\n"
-        f"{'-'*16}\n"
-        + "\n\n".join(parts)
-        + repeat_instructions
-        + "\n\nلا تُدرج أي كود، فقط نص Markdown."
-    )
-    return prompt
-
-# ------------------------------
-# توليد المقال
-# ------------------------------
-def generate_article(
-    keyword: str,
-    related_keywords: List[str],
-    length_preset: str,
-    tone: str,
-    include_outline: bool = False,
-    *,
-    enable_editor_note: bool = True,
-    enable_not_applicable: bool = True,
-    enable_methodology: bool = True,
-    enable_sources: bool = True,
-    enable_scenarios: bool = True,
-    enable_faq: bool = True,
-    enable_comparison: bool = True,
-    scenarios_count: int = 3,
-    faq_count: int = 4,
+    model: str = MODEL_NAME,
 ) -> Dict[str, Any]:
     """
-    يولّد المقال Markdown وفق القوالب والخيارات، ويرجع:
-    { article, meta, quality_notes, outline? }
+    يولّد مقالًا متكاملًا. إن كان include_outline=True سيولّد الـ Outline أولًا ثم يكتب المقال.
+    يطبّق بعدها مرحلة توسيع تلقائية حتى بلوغ الحد الأدنى للطول.
     """
-    user_prompt = build_article_prompt(
+    # 1) تهيئة البرومبت
+    prompt = build_article_prompt(
         keyword=keyword,
         related_keywords=related_keywords,
         length_preset=length_preset,
         tone=tone,
+        include_outline=include_outline,
         enable_editor_note=enable_editor_note,
         enable_not_applicable=enable_not_applicable,
         enable_methodology=enable_methodology,
@@ -213,52 +266,72 @@ def generate_article(
         faq_count=faq_count,
     )
 
-    system = "أنت محرر عربي محترف في تفسير الأحلام. التزم بالاعتبارات التحريرية والاحتمالية."
+    outline_md = ""
+    # 2) (اختياري) توليد Outline في نداء منفصل لتجنب قص النص
+    if include_outline:
+        outline_system = (
+            "أنت خبير إعداد مخطط (Outline) لمقال تفسير أحلام. "
+            "أنشئ مخططًا موجزًا من 6–10 عناصر (H2/H3) يراعي البنية المطلوبة."
+        )
+        outline_user = (
+            f"العنوان المقترح: تفسير {keyword}\n"
+            f"الكلمات المرتبطة: {_safe_join_keywords(related_keywords)}\n"
+            "أعطني Outline مختصرًا ومتوازنًا، بدون متن، بصيغة Markdown (عناوين فقط)."
+        )
+        outline_md = chat_complete(
+            messages=[{"role": "system", "content": outline_system},
+                      {"role": "user", "content": outline_user}],
+            temperature=0.5,
+            max_output_tokens=700,
+            model=model,
+        ).strip()
 
-    article_md = chat_complete(
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user_prompt}],
-        temperature=0.65,
-        max_output_tokens=2000,
+    # 3) توليد المقال الأساسي
+    messages = [
+        {"role": "system", "content": prompt["system"]},
+        {"role": "user", "content": prompt["user"]},
+    ]
+    first_pass = chat_complete(
+        messages=messages,
+        temperature=0.6,
+        max_output_tokens=3800,  # مساحة واسعة للإخراج
+        model=model,
+    ).strip()
+
+    # 4) توسيع تلقائي إن كان المقال أقصر من المطلوب
+    article = expand_to_target(
+        article_md=first_pass,
+        keyword=keyword,
+        related_keywords=related_keywords,
+        length_preset=length_preset,
+        model=model,
     )
 
-    # Outline (اختياري)
-    outline_md = ""
-    if include_outline:
-        outline_md = chat_complete(
-            messages=[
-                {"role": "system", "content": "أنشئ مخطط عناوين موجز لمقال عربي بصيغة Markdown."},
-                {"role": "user", "content": f"المقال عن: {keyword}\nاتّبع الأقسام المذكورة في القوالب."}
-            ],
-            temperature=0.4,
-            max_output_tokens=400,
-        )
-
-    # Meta مبدئي (ستتحسن لاحقًا عبر meta_generator)
-    meta = {
-        "title": f"{keyword} — دلالات محتملة بحسب السياق",
-        "description": f"مقال يشرح احتمالات {keyword} مع أمثلة وسيناريوهات وتنبيه مهني."
-    }
-
+    # 5) Quality notes مختصرة (للعرض في الشريط الجانبي)
+    length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
     quality_notes = {
-        "length_target": length_preset,
-        "sections_target": "Intro/Why/NotApplicable/Scenarios/FAQ/Comparison/Methodology/Sources/Outro",
+        "length_target": f"{length_min}-{length_max} كلمة",
+        "sections_target": "؛ ".join([s.replace("## ", "") for s in prompt["sections"]]),
         "tone": tone,
-        "outline_used": include_outline,
+        "outline_used": bool(include_outline and outline_md),
         "enforced_rules": [
-            "لغة بسيطة وجمل قصيرة",
-            "صياغة احتمالية دائمًا",
-            "تمييز النقل عن رأي المحرّر",
-            "إخلاء مسؤولية مهني في الخاتمة",
-            "متى لا ينطبق التفسير (إن كان مفعّلًا)",
-            "منهجية التفسير (إن كانت مفعّلة)",
-            "مراجع صريحة (إن كانت مفعّلة)"
+            "صياغة احتمالية",
+            "منع الجزم/الوعود",
+            "تنويه مهني في الخاتمة",
+            "تفكيك الحلم ودمج مشاعر/سياق",
+            "سيناريوهات واقعية/FAQ عند التفعيل",
+            "تمييز الرأي عن النقل",
+            "مراعاة الحساسية الدينية/الثقافية",
         ],
     }
 
+    # 6) إرجاع النتيجة
     return {
-        "article": article_md,
-        "meta": meta,
+        "article": article,
+        "outline": outline_md,
+        "meta": {
+            "title": f"تفسير {keyword}",
+            "description": "",
+        },
         "quality_notes": quality_notes,
-        "outline": outline_md if include_outline else ""
     }
