@@ -13,6 +13,7 @@
 # - utils/heading_tools.py    (Normalize Headings)
 # ===========================
 
+import re
 import streamlit as st
 from utils.openai_client import generate_article
 from utils.exporters import to_markdown, to_docx_bytes, to_json_bytes
@@ -288,7 +289,6 @@ if st.session_state["result"]:
             st.markdown(result["article"])
 
     # ===== Normalize Headings =====
-    from utils.heading_tools import normalize_headings  # (إعادة الاستيراد آمن هنا)
     st.markdown("---")
     st.subheader("🧭 Normalize Headings (تطبيع العناوين)")
 
@@ -383,7 +383,7 @@ if st.session_state["result"]:
     else:
         st.caption("لم يتم إدخال مقالات سابقة للمقارنة الأسلوبية.")
 
-    # ===== تحرير قسم محدد =====
+    # ===== تحرير قسم محدد (أزرار سريعة + تحديد يدوي) =====
     st.markdown("---")
     st.subheader("✍️ إعادة توليد قسم محدد")
 
@@ -392,13 +392,76 @@ if st.session_state["result"]:
         st.caption("لا توجد عناوين H2/H3 لاختيار قسم.")
     else:
         titles = [t for (t, lvl, s, e) in secs]
+
+        # أزرار سريعة وفق توفر الأقسام:
+        quick_defs = [
+            ("افتتاحية", "intro",  None),
+            ("لماذا قد يظهر الرمز؟", "why", None),
+            ("متى لا ينطبق التفسير؟", "not_applicable", None),
+            ("سيناريوهات واقعية", "scenarios", st.session_state.get("scenarios_count", 3) if 'scenarios_count' in st.session_state else 3),
+            ("أسئلة شائعة", "faq", st.session_state.get("faq_count", 4) if 'faq_count' in st.session_state else 4),
+            ("مقارنة دقيقة", "comparison", None),
+            ("منهجية التفسير", "methodology", None),
+            ("خاتمة", "outro", None),
+        ]
+
+        # خرائط بسيطة للعثور على العنوان المطابق بالنص (بدون ##)
+        title_map = {t: t for t in titles}
+        def find_title_by_hint(hints):
+            for t in titles:
+                for h in hints:
+                    if re.fullmatch(h, t):
+                        return t
+            return None
+
+        st.write("**أزرار سريعة:**")
+        cols = st.columns(4)
+        btn_idx = 0
+        for display, sec_type, target_count in quick_defs:
+            # الأنماط لنص العنوان نفسه (بدون ##)
+            hint_patterns = {
+                "intro":        [r"افتتاحية"],
+                "why":          [r"لماذا\s+قد\s+يظهر\s+الرمز\؟?"],
+                "not_applicable":[r"متى\s+لا\s+ينطبق\s+التفسير\؟?"],
+                "scenarios":    [r"سيناريوهات\s+واقعية"],
+                "faq":          [r"أسئلة\s+شائعة"],
+                "comparison":   [r"مقارنة\s+دقيقة"],
+                "methodology":  [r"منهجية\s+التفسير"],
+                "outro":        [r"خاتمة"],
+            }.get(sec_type, [re.escape(display)])
+
+            sec_title = find_title_by_hint(hint_patterns)
+            if sec_title:
+                with cols[btn_idx % 4]:
+                    if st.button(f"🔁 {display}"):
+                        with st.spinner(f"إعادة توليد: {display}…"):
+                            try:
+                                new_article = regenerate_section(
+                                    article_md=result["article"],
+                                    section_title=sec_title,
+                                    keyword=st.session_state["keyword"],
+                                    related_keywords=st.session_state["related_keywords"],
+                                    tone=st.session_state["tone"],
+                                    section_type=sec_type,
+                                    target_count=target_count,
+                                )
+                                result["article"] = new_article
+                                st.session_state["result"] = result
+                                st.success(f"✅ تم تحديث قسم «{display}».")
+                                st.markdown(new_article)
+                            except Exception as e:
+                                st.error(f"تعذّرت إعادة توليد القسم: {e}")
+                btn_idx += 1
+
+        st.markdown("**أو اختر يدويًا:**")
         selected = st.selectbox("اختر قسمًا لإعادة توليده:", titles, index=0)
         if selected:
             preview = extract_section_text(result["article"], selected)
             with st.expander("معاينة القسم الحالي"):
                 st.markdown(preview)
 
-            if st.button("🔁 إعادة توليد هذا القسم"):
+            st.caption("يمكنك استخدام الأزرار السريعة بالأعلى للأقسام الشائعة.")
+            if st.button("🔁 إعادة توليد القسم المحدد"):
                 with st.spinner("يعاد توليد القسم المحدد…"):
                     try:
                         new_article = regenerate_section(
@@ -415,4 +478,4 @@ if st.session_state["result"]:
                     except Exception as e:
                         st.error(f"تعذّرت إعادة توليد القسم: {e}")
 
-    st.success("✅ المقال جاهز — أنشئ، نظّف، طبّع العناوين، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
+    st.success("✅ المقال جاهز — تحكم دقيق بإعادة توليد الأقسام الأساسية بسرعة، مع الحفاظ على بقية المحتوى.")
