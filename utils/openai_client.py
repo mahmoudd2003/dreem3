@@ -1,9 +1,9 @@
 # utils/openai_client.py
 # =====================================================
-# واجهة موحّدة للتعامل مع OpenAI (SDK الحديث openai>=1.30)
-# - chat_complete: نداء دردشة عام
-# - build_article_prompt: برومبت منضبط بعناصر النظام/المستخدم
-# - generate_article: توليد المقال (+ اختيار Outline) + توسيع تلقائي لضمان الطول
+# واجهة موحّدة للتعامل مع OpenAI (توافق بين إصدارات SDK)
+# - chat_complete: نداء دردشة عام مع طبقة توافق max_output_tokens/max_tokens
+# - build_article_prompt: برومبت مضبوط + قائمة تحقق للطول
+# - generate_article: توليد المقال (+ Outline اختياري) + توسيع تلقائي
 # - expand_to_target: يعمّق المقال إن كان أقصر من الحد الأدنى
 # =====================================================
 
@@ -12,40 +12,28 @@ from typing import List, Dict, Any, Tuple
 import os
 import re
 
-# التحقق من المكتبة الحديثة
+# التحقق من المكتبة
 try:
     from openai import OpenAI
-except Exception as e:
+except Exception:
     raise RuntimeError(
         "لم يتم العثور على مكتبة OpenAI الحديثة. ثبّت: pip install openai --upgrade"
     )
 
-# ---------------------------------
-# إعداد العميل والنموذج الافتراضي
-# ---------------------------------
-if not os.getenv("OPENAI_API_KEY"):
-    # لا نوقف التنفيذ بقسوة، لكن سنفشل عند أول نداء فعلي
-    pass
-
 client = OpenAI()
 
-# يمكنك ضبط اسم الموديل عبر متغير بيئة OPENAI_MODEL
+# اضبط اسم الموديل من البيئة أو استخدم افتراضي
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
-# ---------------------------------
-# خرائط الطول المستهدفة
-# ---------------------------------
+# خرائط الطول
 LENGTH_TARGETS: Dict[str, Tuple[int, int]] = {
     "short":  (600,  800),
     "medium": (900,  1200),
     "long":   (1300, 1600),
 }
 
-# ---------------------------------
 # أدوات مساعدة
-# ---------------------------------
 _WORD_RE = re.compile(r"[A-Za-z\u0600-\u06FF]+", re.UNICODE)
-
 def _word_count(text: str) -> int:
     return len(_WORD_RE.findall(text or ""))
 
@@ -53,7 +41,7 @@ def _safe_join_keywords(keywords: List[str]) -> str:
     return ", ".join([k.strip() for k in keywords if k and k.strip()]) or "لا يوجد"
 
 # ---------------------------------
-# واجهة دردشة موحّدة
+# واجهة دردشة + طبقة توافق
 # ---------------------------------
 def chat_complete(
     *,
@@ -63,15 +51,25 @@ def chat_complete(
     model: str = MODEL_NAME,
 ) -> str:
     """
-    نداء موحّد لـ Chat Completions بالـ SDK الحديث.
-    انتبه: الحقل الصحيح هو max_output_tokens (وليس max_tokens).
+    نداء موحّد لـ Chat Completions.
+    - بعض إصدارات SDK تستخدم max_tokens بدل max_output_tokens.
+    - نجرّب أولاً max_output_tokens، وإن فشل نعيد المحاولة بـ max_tokens.
     """
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_output_tokens=max_output_tokens,
-    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+    except TypeError:
+        # طبقة توافق لإصدارات SDK الأقدم
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+        )
     return resp.choices[0].message.content or ""
 
 # ---------------------------------
@@ -94,14 +92,9 @@ def build_article_prompt(
     scenarios_count: int,
     faq_count: int,
 ) -> Dict[str, Any]:
-    """
-    يرجع dict يحوي نصوص system/user وقائمة تحقق صريحة للتحكم بالطول والبنية.
-    """
     length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
     rk = _safe_join_keywords(related_keywords)
 
-    # صياغة أقسام المقال
-    # سنثبت عناوين H2 الأساسية، ونُفعّل الاختيارية حسب الإعداد.
     sections = [
         "## افتتاحية",
         "## لماذا قد يظهر الرمز؟",
@@ -124,8 +117,8 @@ def build_article_prompt(
 
     system = (
         "أنت محرر عربي محترف يكتب مقالات تفسير أحلام بشرية الطابع.\n"
-        "التزم بالآتي بدقة:\n"
-        "- لغة بسيطة مباشرة، جمل قصيرة وفقرة مرتبة.\n"
+        "التزم بالآتي:\n"
+        "- لغة بسيطة مباشرة، جمل قصيرة وفقرات منسّقة.\n"
         "- صياغة احتمالية دائمًا (قد/يُحتمل/بحسب السياق)، ومنع الجزم والوعود/التنبؤات.\n"
         "- تمييز الرأي المعاصر عن النقل التراثي عند ذكره.\n"
         "- لا نصائح طبية/نفسية/مالية قاطعة. احترام الحساسية الدينية.\n"
@@ -133,7 +126,6 @@ def build_article_prompt(
         "- لا حشو ولا تكرار.\n"
     )
 
-    # قيود صريحة للطول والبنية
     hard_constraints = [
         f"- إجمالي الكلمات بين {length_min} و {length_max} كلمة.",
         "- لا يقل كل قسم أساسي (افتتاحية/لماذا/خاتمة) عن 120–180 كلمة.",
@@ -166,7 +158,7 @@ def build_article_prompt(
         "- أدرج نصائح تهدئة ومتى أستشير مختصًا عند القلق.\n"
         "- «ما الذي لا يعنيه الحلم؟» تُدمج ضمن الأقسام الملائمة لتبديد المعتقدات الشائعة.\n"
         "- أدرج أمثلة واقعية مُقننة وFAQ قصير إذا كانت الأقسام مفعّلة.\n"
-        "- لا تضف مقدمة H1؛ العنوان الرئيسي سيكون خارج النص (لنضيفه من الميتا).\n"
+        "- لا تضف H1 داخل النص؛ العنوان الرئيسي خارج الماركداون.\n"
     )
 
     return {
@@ -188,10 +180,6 @@ def expand_to_target(
     length_preset: str,
     model: str = MODEL_NAME,
 ) -> str:
-    """
-    إن كان المقال أقصر من الحد الأدنى، نطلب من النموذج توسيع المحتوى
-    مع الحفاظ على البنية والعناوين.
-    """
     length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
     curr = _word_count(article_md)
     if curr >= length_min:
@@ -218,7 +206,6 @@ def expand_to_target(
         model=model,
     )
     new_article = addition.strip()
-    # أمان بسيط: إذا فشل النموذج في إعادة المقال كاملًا، نرجع القديم
     if "## " not in new_article:
         return article_md
     return new_article
@@ -244,11 +231,6 @@ def generate_article(
     faq_count: int = 4,
     model: str = MODEL_NAME,
 ) -> Dict[str, Any]:
-    """
-    يولّد مقالًا متكاملًا. إن كان include_outline=True سيولّد الـ Outline أولًا ثم يكتب المقال.
-    يطبّق بعدها مرحلة توسيع تلقائية حتى بلوغ الحد الأدنى للطول.
-    """
-    # 1) تهيئة البرومبت
     prompt = build_article_prompt(
         keyword=keyword,
         related_keywords=related_keywords,
@@ -267,7 +249,6 @@ def generate_article(
     )
 
     outline_md = ""
-    # 2) (اختياري) توليد Outline في نداء منفصل لتجنب قص النص
     if include_outline:
         outline_system = (
             "أنت خبير إعداد مخطط (Outline) لمقال تفسير أحلام. "
@@ -286,7 +267,7 @@ def generate_article(
             model=model,
         ).strip()
 
-    # 3) توليد المقال الأساسي
+    # التوليد الأساسي
     messages = [
         {"role": "system", "content": prompt["system"]},
         {"role": "user", "content": prompt["user"]},
@@ -294,11 +275,11 @@ def generate_article(
     first_pass = chat_complete(
         messages=messages,
         temperature=0.6,
-        max_output_tokens=3800,  # مساحة واسعة للإخراج
+        max_output_tokens=3800,
         model=model,
     ).strip()
 
-    # 4) توسيع تلقائي إن كان المقال أقصر من المطلوب
+    # توسيع تلقائي حتى بلوغ الحد الأدنى
     article = expand_to_target(
         article_md=first_pass,
         keyword=keyword,
@@ -306,12 +287,35 @@ def generate_article(
         length_preset=length_preset,
         model=model,
     )
-
-    # 5) Quality notes مختصرة (للعرض في الشريط الجانبي)
+    # محاولة ثانية نادرة إذا ما زال أقل (احتياط)
     length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
+    if _word_count(article) < length_min:
+        article = expand_to_target(
+            article_md=article,
+            keyword=keyword,
+            related_keywords=related_keywords,
+            length_preset=length_preset,
+            model=model,
+        )
+
     quality_notes = {
         "length_target": f"{length_min}-{length_max} كلمة",
-        "sections_target": "؛ ".join([s.replace("## ", "") for s in prompt["sections"]]),
+        "sections_target": "؛ ".join([s.replace("## ", "") for s in build_article_prompt(
+            keyword=keyword,
+            related_keywords=related_keywords,
+            length_preset=length_preset,
+            tone=tone,
+            include_outline=include_outline,
+            enable_editor_note=enable_editor_note,
+            enable_not_applicable=enable_not_applicable,
+            enable_methodology=enable_methodology,
+            enable_sources=enable_sources,
+            enable_scenarios=enable_scenarios,
+            enable_faq=enable_faq,
+            enable_comparison=enable_comparison,
+            scenarios_count=scenarios_count,
+            faq_count=faq_count,
+        )["sections"]]),
         "tone": tone,
         "outline_used": bool(include_outline and outline_md),
         "enforced_rules": [
@@ -325,7 +329,6 @@ def generate_article(
         ],
     }
 
-    # 6) إرجاع النتيجة
     return {
         "article": article,
         "outline": outline_md,
