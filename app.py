@@ -2,7 +2,7 @@
 # ===========================
 # واجهة Streamlit لنظام كتابة مقالات تفسير الأحلام
 # يعتمد على:
-# - utils/openai_client.py    (generate_article)
+# - utils/openai_client.py    (generate_article + build_article_prompt)
 # - utils/exporters.py        (تصدير Markdown/DOCX/JSON)
 # - utils/quality_checks.py   (تقرير الجودة التفصيلي)
 # - utils/meta_generator.py   (مولّد الميتا الذكي)
@@ -79,6 +79,22 @@ previous_corpus_raw = st.text_area(
     value=""
 )
 
+# ⚙️ خيارات الأقسام المحسّنة (تؤثر على البرومبت مباشرة)
+st.markdown("### ⚙️ أقسام محسّنة (اختياري)")
+col_opt1, col_opt2, col_opt3 = st.columns(3)
+with col_opt1:
+    enable_editor_note = st.checkbox("تعليق محرّر", value=True)
+    enable_not_applicable = st.checkbox("متى لا ينطبق التفسير؟", value=True)
+    enable_methodology = st.checkbox("منهجية التفسير", value=True)
+with col_opt2:
+    enable_sources = st.checkbox("مصادر صريحة", value=True)
+    enable_scenarios = st.checkbox("سيناريوهات واقعية", value=True)
+    scenarios_count = st.slider("عدد السيناريوهات", 3, 5, 3)
+with col_opt3:
+    enable_faq = st.checkbox("أسئلة شائعة", value=True)
+    faq_count = st.slider("عدد الأسئلة الشائعة", 3, 6, 4)
+    enable_comparison = st.checkbox("مقارنة دقيقة", value=True)
+
 # تحويل نص الطول إلى preset داخلي
 def _length_preset_from_label(label: str) -> str:
     if label.startswith("قصير"):
@@ -103,7 +119,7 @@ if "tone" not in st.session_state:
 # ===== توليد المقال =====
 if st.button("🚀 إنشاء المقال"):
     if not keyword.strip():
-        st.error("⚠️ يرجى إدخال الكلمة المفتاحية أولاً.")
+        st.error("⚠️ يرجى إدخال الكلمة المفتاحية أولًا.")
         st.stop()
 
     with st.spinner("✍️ جاري إنشاء المقال بواسطة GPT…"):
@@ -113,7 +129,16 @@ if st.button("🚀 إنشاء المقال"):
                 related_keywords=related_keywords,
                 length_preset=length_preset,   # short/medium/long
                 tone=tone,                     # هادئة/قصصية/تحليلية
-                include_outline=include_outline
+                include_outline=include_outline,
+                enable_editor_note=enable_editor_note,
+                enable_not_applicable=enable_not_applicable,
+                enable_methodology=enable_methodology,
+                enable_sources=enable_sources,
+                enable_scenarios=enable_scenarios,
+                enable_faq=enable_faq,
+                enable_comparison=enable_comparison,
+                scenarios_count=scenarios_count,
+                faq_count=faq_count,
             )
         except Exception as e:
             st.error(f"حدث خطأ أثناء التوليد: {e}")
@@ -263,6 +288,7 @@ if st.session_state["result"]:
             st.markdown(result["article"])
 
     # ===== Normalize Headings =====
+    from utils.heading_tools import normalize_headings  # (إعادة الاستيراد آمن هنا)
     st.markdown("---")
     st.subheader("🧭 Normalize Headings (تطبيع العناوين)")
 
@@ -323,7 +349,7 @@ if st.session_state["result"]:
     else:
         st.caption("لم يتم إدخال مخزون روابط داخلية؛ أضِف JSON في الحقل أعلاه لرؤية اقتراحات.")
 
-    # ===== مؤشر تنوّع الأسلوب =====
+    # ===== مؤشّر تنوّع الأسلوب =====
     if previous_corpus_raw and previous_corpus_raw.strip():
         st.subheader("🎭 مؤشّر تنوّع الأسلوب")
         srep = style_diversity_report(result["article"], previous_corpus_raw, top_k=5)
@@ -339,7 +365,6 @@ if st.session_state["result"]:
             f"- كثافة الترقيم: {sm.get('punctuation_density')} | عدد الجمل: {sm.get('sentences_count')} | عدد التوكنز: {sm.get('tokens_count')}"
         )
 
-        # أعلى المقالات تشابهًا
         top_sim = srep.get("top_similar", [])
         if top_sim:
             st.write("**أعلى المقالات تشابهًا:**")
@@ -348,7 +373,6 @@ if st.session_state["result"]:
         else:
             st.caption("لا توجد مقالات متشابهة بدرجة ملحوظة.")
 
-        # توصيات
         sugg = srep.get("suggestions", [])
         if sugg:
             st.write("**توصيات تقليل التشابه:**")
@@ -359,7 +383,7 @@ if st.session_state["result"]:
     else:
         st.caption("لم يتم إدخال مقالات سابقة للمقارنة الأسلوبية.")
 
-    # ===== تحرير قسم محدد (Regenerate Section) =====
+    # ===== تحرير قسم محدد =====
     st.markdown("---")
     st.subheader("✍️ إعادة توليد قسم محدد")
 
@@ -384,7 +408,6 @@ if st.session_state["result"]:
                             related_keywords=st.session_state["related_keywords"],
                             tone=st.session_state["tone"],
                         )
-                        # تحديث الحالة والعرض
                         result["article"] = new_article
                         st.session_state["result"] = result
                         st.success("✅ تم تحديث القسم بنجاح.")
