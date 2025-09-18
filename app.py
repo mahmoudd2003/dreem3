@@ -2,15 +2,17 @@
 # ===========================
 # واجهة Streamlit لنظام كتابة مقالات تفسير الأحلام
 # يعتمد على:
-# - utils/openai_client.py  (دالة generate_article)
-# - utils/exporters.py      (تصدير Markdown/DOCX/JSON)
-# - utils/quality_checks.py (تقرير الجودة التفصيلي)
+# - utils/openai_client.py   (generate_article)
+# - utils/exporters.py       (تصدير Markdown/DOCX/JSON)
+# - utils/quality_checks.py  (تقرير الجودة التفصيلي)
+# - utils/meta_generator.py  (مولّد الميتا الذكي)
 # ===========================
 
 import streamlit as st
 from utils.openai_client import generate_article
 from utils.exporters import to_markdown, to_docx_bytes, to_json_bytes
 from utils.quality_checks import run_quality_report
+from utils.meta_generator import generate_meta
 
 # إعداد الصفحة
 st.set_page_config(
@@ -73,6 +75,14 @@ if st.button("🚀 إنشاء المقال"):
             st.error(f"حدث خطأ أثناء التوليد: {e}")
             st.stop()
 
+    # تحسين/تأكيد الميتا (ذكي، ≤155 حرف للوصف)
+    try:
+        improved_meta = generate_meta(keyword.strip(), result["article"])
+        if improved_meta.get("title") or improved_meta.get("description"):
+            result["meta"] = improved_meta
+    except Exception:
+        pass
+
     # ===== العرض =====
     col1, col2 = st.columns([2, 1], gap="large")
 
@@ -89,6 +99,19 @@ if st.button("🚀 إنشاء المقال"):
         meta = result.get("meta", {})
         st.write(f"**العنوان (Title):** {meta.get('title', '')}")
         st.write(f"**الوصف (Description):** {meta.get('description', '')}")
+
+        # زر تحسين الميتا يدويًا (اختياري)
+        if st.button("✨ تحسين الميتا (عنوان + وصف)"):
+            try:
+                improved_meta_btn = generate_meta(keyword.strip(), result["article"])
+                if improved_meta_btn:
+                    meta = improved_meta_btn
+                    result["meta"] = improved_meta_btn
+                    st.success("تم تحسين الميتا.")
+                    st.write(f"**العنوان (Title):** {meta.get('title', '')}")
+                    st.write(f"**الوصف (Description):** {meta.get('description', '')}")
+            except Exception as e:
+                st.error(f"تعذّر تحسين الميتا: {e}")
 
         st.subheader("✅ Quality Gates (مختصر)")
         qn = result.get("quality_notes", {})
