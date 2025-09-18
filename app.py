@@ -7,6 +7,7 @@
 # - utils/quality_checks.py   (تقرير الجودة التفصيلي)
 # - utils/meta_generator.py   (مولّد الميتا الذكي)
 # - utils/internal_links.py   (اقتراح الروابط الداخلية)
+# - utils/style_diversity.py  (مؤشر تنوّع الأسلوب)
 # ===========================
 
 import streamlit as st
@@ -15,6 +16,7 @@ from utils.exporters import to_markdown, to_docx_bytes, to_json_bytes
 from utils.quality_checks import run_quality_report
 from utils.meta_generator import generate_meta
 from utils.internal_links import parse_inventory, suggest_internal_links
+from utils.style_diversity import style_diversity_report
 
 # إعداد الصفحة
 st.set_page_config(
@@ -59,6 +61,16 @@ inventory_raw = st.text_area(
   {"title":"تفسير رؤية السباحة","url":"/swim-dream","tags":["سباحة","ماء","ثقة"]},
   {"title":"تفسير رؤية الذهب","url":"/gold-dream","tags":["ذهب","مال","زينة"]}
 ]'''
+)
+
+# كوربس المقالات السابقة للمقارنة الأسلوبية (اختياري)
+st.markdown("### 🧪 مقالات سابقة للمقارنة الأسلوبية (اختياري)")
+previous_corpus_raw = st.text_area(
+    "ألصق مقالاتك السابقة للمقارنة. تقبل الصيغتين:\n"
+    "1) JSON: [{\"title\":\"...\",\"content\":\"...\"}, ...]\n"
+    "2) نص مفصول بـ --- حيث السطر الأول عنوان والباقي محتوى لكل مقال.",
+    height=200,
+    value=""
 )
 
 # تحويل نص الطول إلى preset داخلي
@@ -209,5 +221,41 @@ if st.button("🚀 إنشاء المقال"):
             st.info("لم يتم العثور على تطابقات كافية مع مخزون الروابط الحالي.")
     else:
         st.caption("لم يتم إدخال مخزون روابط داخلية؛ أضِف JSON في الحقل أعلاه لرؤية اقتراحات.")
+
+    # ===== مؤشر تنوّع الأسلوب =====
+    if previous_corpus_raw and previous_corpus_raw.strip():
+        st.subheader("🎭 مؤشّر تنوّع الأسلوب")
+        srep = style_diversity_report(result["article"], previous_corpus_raw, top_k=5)
+
+        st.write(f"**حجم كوربس المقارنة:** {srep.get('corpus_size')}")
+        st.write(f"**متوسط التشابه (Jaccard 3-grams):** {srep.get('avg_similarity')}")
+        st.write(f"**مستوى المخاطر:** {srep.get('risk_level')}")
+
+        sm = srep.get("style_metrics", {})
+        st.write(
+            f"- TTR (تنوّع المفردات): {sm.get('type_token_ratio')}\n"
+            f"- متوسط طول الجملة (توكنز): {sm.get('avg_sentence_length_tokens')}\n"
+            f"- كثافة الترقيم: {sm.get('punctuation_density')} | عدد الجمل: {sm.get('sentences_count')} | عدد التوكنز: {sm.get('tokens_count')}"
+        )
+
+        # أعلى المقالات تشابهًا
+        top_sim = srep.get("top_similar", [])
+        if top_sim:
+            st.write("**أعلى المقالات تشابهًا:**")
+            for i, item in enumerate(top_sim, 1):
+                st.write(f"{i}. {item['title']} — similarity: {item['similarity']}")
+        else:
+            st.caption("لا توجد مقالات متشابهة بدرجة ملحوظة.")
+
+        # توصيات
+        sugg = srep.get("suggestions", [])
+        if sugg:
+            st.write("**توصيات تقليل التشابه:**")
+            for s in sugg:
+                st.write(f"• {s}")
+        else:
+            st.caption("لا توجد توصيات — التنوع جيد 👍")
+    else:
+        st.caption("لم يتم إدخال مقالات سابقة للمقارنة الأسلوبية.")
 
     st.success("✅ تم إنشاء المقال بنجاح — راجع وعدّل ثم صدّر بالصيغة التي تريدها.")
