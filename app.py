@@ -8,7 +8,7 @@
 # - utils/meta_generator.py   (مولّد الميتا الذكي)
 # - utils/internal_links.py   (اقتراح الروابط الداخلية)
 # - utils/style_diversity.py  (مؤشر تنوّع الأسلوب)
-# - utils/section_tools.py    (تحرير قسم محدد)
+# - utils/section_tools.py    (تحرير/إعادة توليد قسم محدد)
 # - utils/text_cleanup.py     (فلترة/تحسينات لغوية)
 # - utils/heading_tools.py    (Normalize Headings)
 # ===========================
@@ -330,6 +330,90 @@ if st.session_state["result"]:
             st.markdown("**المقال بعد التطبيع:**")
             st.markdown(result["article"])
 
+    # ===== دفعة إصلاح تلقائية =====
+    st.markdown("---")
+    st.subheader("🚑 دفعة إصلاح (تنظيف + Normalize + خاتمة مسؤولة)")
+
+    col_fix_a, col_fix_b = st.columns(2)
+    with col_fix_a:
+        fx_fix_punct = st.checkbox("تصحيح الترقيم/المسافات", value=True, key="fx_fix_punct")
+        fx_remove_filler = st.checkbox("إزالة الحشو الواضح", value=True, key="fx_remove_filler")
+        fx_normalize_ws = st.checkbox("تطبيع المسافات والأسطر", value=True, key="fx_normalize_ws")
+    with col_fix_b:
+        fx_h1_to_h2 = st.checkbox("H1→H2", value=True, key="fx_h1_to_h2")
+        fx_h4_to_h3 = st.checkbox("H4+→H3", value=True, key="fx_h4_to_h3")
+        fx_autonumber = st.checkbox("ترقيم تلقائي H2/H3", value=False, key="fx_autonumber")
+
+    if st.button("🚑 طبّق دفعة الإصلاح الآن"):
+        if not result or not result.get("article"):
+            st.error("لا يوجد مقال مُولد بعد.")
+        else:
+            with st.spinner("تطبيق الدفعة…"):
+                # 1) تنظيف لغوي
+                cleaned = clean_article(
+                    result["article"],
+                    remove_filler=fx_remove_filler,
+                    aggressive=False,
+                    fix_punct=fx_fix_punct,
+                    normalize_ws=fx_normalize_ws,
+                )
+                article_fx = cleaned["cleaned"]
+                rep_clean = cleaned["report"]
+
+                # 2) Normalize Headings
+                nh = normalize_headings(
+                    article_fx,
+                    h1_to_h2=fx_h1_to_h2,
+                    h4plus_to_h3=fx_h4_to_h3,
+                    unify_space_after_hash=True,
+                    trim_trailing_punct=True,
+                    collapse_spaces=True,
+                    remove_consecutive_duplicates=True,
+                    autonumber=fx_autonumber,
+                )
+                article_fx = nh["normalized"]
+                rep_head = nh["changes"]
+
+                # 3) إعادة توليد "الخاتمة" (مسؤولة + تنويه مهني)
+                secs = list_sections(article_fx)
+                outro_title = None
+                for t, lvl, s, e in secs:
+                    if re.fullmatch(r"خاتمة", t):
+                        outro_title = t
+                        break
+
+                if outro_title:
+                    try:
+                        article_fx = regenerate_section(
+                            article_md=article_fx,
+                            section_title=outro_title,
+                            keyword=st.session_state.get("keyword", ""),
+                            related_keywords=st.session_state.get("related_keywords", []),
+                            tone=st.session_state.get("tone", "هادئة"),
+                            section_type="outro",
+                        )
+                        fx_outro_done = True
+                    except Exception as e:
+                        fx_outro_done = False
+                        st.warning(f"تعذّرت إعادة توليد الخاتمة تلقائيًا: {e}")
+                else:
+                    fx_outro_done = False
+                    st.info("لم يتم العثور على قسم «خاتمة». تخطّينا خطوة إعادة توليد الخاتمة.")
+
+                # تحديث الحالة والعرض
+                result["article"] = article_fx
+                st.session_state["result"] = result
+
+            st.success("✅ تم تطبيق دفعة الإصلاح.")
+            st.write("**ملخص الدفعة:**")
+            st.write(
+                f"- تنظيف: حذف/قص الحشو = {rep_clean['filler_removed']} | تقليص تكرار الترقيم = {rep_clean['repeated_punct_collapsed']} | فواصل عربية = {rep_clean['arabic_comma_applied']}\n"
+                f"- Normalize: H1→H2 = {rep_head['h1_to_h2']} | H4+→H3 = {rep_head['h4plus_to_h3']} | حذف مكرر = {rep_head['deduped_headings']} | ترقيم تلقائي = {rep_head['autonumbered']}\n"
+                f"- خاتمة مسؤولة: {'تمت' if fx_outro_done else 'تخطّينا/تعذّر'}"
+            )
+            st.markdown("**المقال بعد الدفعة:**")
+            st.markdown(result["article"])
+
     # ===== اقتراح الروابط الداخلية =====
     inventory = parse_inventory(inventory_raw)
     if inventory:
@@ -393,7 +477,7 @@ if st.session_state["result"]:
     else:
         titles = [t for (t, lvl, s, e) in secs]
 
-        # أزرار سريعة وفق توفر الأقسام:
+        # أزرار سريعة
         quick_defs = [
             ("افتتاحية", "intro",  None),
             ("لماذا قد يظهر الرمز؟", "why", None),
@@ -405,8 +489,6 @@ if st.session_state["result"]:
             ("خاتمة", "outro", None),
         ]
 
-        # خرائط بسيطة للعثور على العنوان المطابق بالنص (بدون ##)
-        title_map = {t: t for t in titles}
         def find_title_by_hint(hints):
             for t in titles:
                 for h in hints:
@@ -418,7 +500,6 @@ if st.session_state["result"]:
         cols = st.columns(4)
         btn_idx = 0
         for display, sec_type, target_count in quick_defs:
-            # الأنماط لنص العنوان نفسه (بدون ##)
             hint_patterns = {
                 "intro":        [r"افتتاحية"],
                 "why":          [r"لماذا\s+قد\s+يظهر\s+الرمز\؟?"],
@@ -478,4 +559,4 @@ if st.session_state["result"]:
                     except Exception as e:
                         st.error(f"تعذّرت إعادة توليد القسم: {e}")
 
-    st.success("✅ المقال جاهز — تحكم دقيق بإعادة توليد الأقسام الأساسية بسرعة، مع الحفاظ على بقية المحتوى.")
+    st.success("✅ المقال جاهز — أنشئ، نظّف، طبّع العناوين، طبّق الدفعة، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
