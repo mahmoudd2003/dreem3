@@ -9,6 +9,7 @@
 # - utils/internal_links.py   (اقتراح الروابط الداخلية)
 # - utils/style_diversity.py  (مؤشر تنوّع الأسلوب)
 # - utils/section_tools.py    (تحرير قسم محدد)
+# - utils/text_cleanup.py     (فلترة/تحسينات لغوية)
 # ===========================
 
 import streamlit as st
@@ -19,6 +20,7 @@ from utils.meta_generator import generate_meta
 from utils.internal_links import parse_inventory, suggest_internal_links
 from utils.style_diversity import style_diversity_report
 from utils.section_tools import list_sections, extract_section_text, regenerate_section
+from utils.text_cleanup import clean_article
 
 # إعداد الصفحة
 st.set_page_config(
@@ -224,6 +226,40 @@ if st.session_state["result"]:
             mime="application/json"
         )
 
+    # ===== الفلترة/التحسينات اللغوية =====
+    st.markdown("---")
+    st.subheader("🧹 فلترة/تحسينات لغوية")
+
+    col_clean_a, col_clean_b = st.columns(2)
+    with col_clean_a:
+        opt_fix_punct = st.checkbox("تصحيح مسافات/شكل الترقيم", value=True)
+        opt_remove_filler = st.checkbox("إزالة جُمل/أسطر حشوية", value=True)
+    with col_clean_b:
+        opt_normalize_ws = st.checkbox("تطبيع المسافات والأسطر", value=True)
+        opt_aggressive = st.checkbox("نمط عدواني لإزالة الحشو (حذر)", value=False)
+
+    if st.button("🧹 تنظيف لغوي وتطبيق"):
+        with st.spinner("يتم تنظيف المقال..."):
+            cleaned = clean_article(
+                result["article"],
+                remove_filler=opt_remove_filler,
+                aggressive=opt_aggressive,
+                fix_punct=opt_fix_punct,
+                normalize_ws=opt_normalize_ws,
+            )
+            result["article"] = cleaned["cleaned"]
+            st.session_state["result"] = result
+            repc = cleaned["report"]
+            st.success("تم تطبيق التنظيف.")
+            st.write("**تقرير التنظيف:**")
+            st.write(
+                f"- تصحيح علامات الحذف: {repc['ellipsis_fixed']} | تقليص تكرار الترقيم: {repc['repeated_punct_collapsed']}\n"
+                f"- فواصل عربية مستبدلة: {repc['arabic_comma_applied']} | إصلاح مسافات الترقيم: {repc['spacing_fixed']}\n"
+                f"- تطبيع مسافات/أسطر: {repc['whitespace_normalized']} | أسطر/جمل حُذفت/قُصّت: {repc['filler_removed']}"
+            )
+            st.markdown("**المقال بعد التنظيف:**")
+            st.markdown(result["article"])
+
     # ===== اقتراح الروابط الداخلية =====
     inventory = parse_inventory(inventory_raw)
     if inventory:
@@ -312,4 +348,4 @@ if st.session_state["result"]:
                     except Exception as e:
                         st.error(f"تعذّرت إعادة توليد القسم: {e}")
 
-    st.success("✅ المقال جاهز مع إمكانية إعادة توليد أي قسم دون إعادة كتابة المقال بالكامل.")
+    st.success("✅ المقال جاهز — أنشئ، نظّف، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
