@@ -2,10 +2,11 @@
 # ===========================
 # واجهة Streamlit لنظام كتابة مقالات تفسير الأحلام
 # يعتمد على:
-# - utils/openai_client.py   (generate_article)
-# - utils/exporters.py       (تصدير Markdown/DOCX/JSON)
-# - utils/quality_checks.py  (تقرير الجودة التفصيلي)
-# - utils/meta_generator.py  (مولّد الميتا الذكي)
+# - utils/openai_client.py    (generate_article)
+# - utils/exporters.py        (تصدير Markdown/DOCX/JSON)
+# - utils/quality_checks.py   (تقرير الجودة التفصيلي)
+# - utils/meta_generator.py   (مولّد الميتا الذكي)
+# - utils/internal_links.py   (اقتراح الروابط الداخلية)
 # ===========================
 
 import streamlit as st
@@ -13,6 +14,7 @@ from utils.openai_client import generate_article
 from utils.exporters import to_markdown, to_docx_bytes, to_json_bytes
 from utils.quality_checks import run_quality_report
 from utils.meta_generator import generate_meta
+from utils.internal_links import parse_inventory, suggest_internal_links
 
 # إعداد الصفحة
 st.set_page_config(
@@ -44,6 +46,20 @@ length_option_label = st.radio(
 tone = st.selectbox("🎙️ النبرة", ["هادئة", "قصصية", "تحليلية"])
 
 include_outline = st.toggle("📐 إنشاء Outline قبل كتابة المقال", value=False)
+
+# مخزون الروابط الداخلية (اختياري)
+st.markdown("### 🧭 مخزون الروابط الداخلية (اختياري)")
+inventory_raw = st.text_area(
+    "ضع قائمة مقالات موقعك بصيغة JSON (title, url, tags). مثال:",
+    height=160,
+    value='''[
+  {"title":"تفسير رؤية البحر","url":"/sea-dream","tags":["البحر","الموج","السباحة"]},
+  {"title":"تفسير رؤية المال","url":"/money-dream","tags":["مال","رزق","ديون"]},
+  {"title":"تفسير رؤية الغرق","url":"/drowning-dream","tags":["الغرق","البحر","الخوف"]},
+  {"title":"تفسير رؤية السباحة","url":"/swim-dream","tags":["سباحة","ماء","ثقة"]},
+  {"title":"تفسير رؤية الذهب","url":"/gold-dream","tags":["ذهب","مال","زينة"]}
+]'''
+)
 
 # تحويل نص الطول إلى preset داخلي
 def _length_preset_from_label(label: str) -> str:
@@ -174,5 +190,24 @@ if st.button("🚀 إنشاء المقال"):
             file_name="article.json",
             mime="application/json"
         )
+
+    # ===== اقتراح الروابط الداخلية =====
+    inventory = parse_inventory(inventory_raw)
+    if inventory:
+        st.subheader("🔗 اقتراح روابط داخلية")
+        suggestions = suggest_internal_links(
+            keyword=keyword.strip(),
+            related_keywords=related_keywords,
+            article_markdown=result["article"],
+            inventory=inventory,
+            top_k=6,
+        )
+        if suggestions:
+            for s in suggestions:
+                st.markdown(f"- [{s['title']}]({s['url']}) — **Score:** {s['score']}")
+        else:
+            st.info("لم يتم العثور على تطابقات كافية مع مخزون الروابط الحالي.")
+    else:
+        st.caption("لم يتم إدخال مخزون روابط داخلية؛ أضِف JSON في الحقل أعلاه لرؤية اقتراحات.")
 
     st.success("✅ تم إنشاء المقال بنجاح — راجع وعدّل ثم صدّر بالصيغة التي تريدها.")
