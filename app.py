@@ -8,6 +8,7 @@
 # - utils/meta_generator.py   (مولّد الميتا الذكي)
 # - utils/internal_links.py   (اقتراح الروابط الداخلية)
 # - utils/style_diversity.py  (مؤشر تنوّع الأسلوب)
+# - utils/section_tools.py    (تحرير قسم محدد)
 # ===========================
 
 import streamlit as st
@@ -17,6 +18,7 @@ from utils.quality_checks import run_quality_report
 from utils.meta_generator import generate_meta
 from utils.internal_links import parse_inventory, suggest_internal_links
 from utils.style_diversity import style_diversity_report
+from utils.section_tools import list_sections, extract_section_text, regenerate_section
 
 # إعداد الصفحة
 st.set_page_config(
@@ -84,7 +86,17 @@ def _length_preset_from_label(label: str) -> str:
 length_preset = _length_preset_from_label(length_option_label)
 related_keywords = [k.strip() for k in related_keywords_raw.splitlines() if k.strip()]
 
-# ===== الإجراء =====
+# حافظة الحالة
+if "result" not in st.session_state:
+    st.session_state["result"] = None
+if "keyword" not in st.session_state:
+    st.session_state["keyword"] = ""
+if "related_keywords" not in st.session_state:
+    st.session_state["related_keywords"] = []
+if "tone" not in st.session_state:
+    st.session_state["tone"] = tone
+
+# ===== توليد المقال =====
 if st.button("🚀 إنشاء المقال"):
     if not keyword.strip():
         st.error("⚠️ يرجى إدخال الكلمة المفتاحية أولاً.")
@@ -111,7 +123,15 @@ if st.button("🚀 إنشاء المقال"):
     except Exception:
         pass
 
-    # ===== العرض =====
+    # حفظ في الحالة
+    st.session_state["result"] = result
+    st.session_state["keyword"] = keyword.strip()
+    st.session_state["related_keywords"] = related_keywords
+    st.session_state["tone"] = tone
+
+# ===== العرض =====
+if st.session_state["result"]:
+    result = st.session_state["result"]  # للسهولة
     col1, col2 = st.columns([2, 1], gap="large")
 
     with col1:
@@ -128,13 +148,14 @@ if st.button("🚀 إنشاء المقال"):
         st.write(f"**العنوان (Title):** {meta.get('title', '')}")
         st.write(f"**الوصف (Description):** {meta.get('description', '')}")
 
-        # زر تحسين الميتا يدويًا (اختياري)
+        # زر تحسين الميتا يدويًا
         if st.button("✨ تحسين الميتا (عنوان + وصف)"):
             try:
-                improved_meta_btn = generate_meta(keyword.strip(), result["article"])
+                improved_meta_btn = generate_meta(st.session_state["keyword"], result["article"])
                 if improved_meta_btn:
                     meta = improved_meta_btn
                     result["meta"] = improved_meta_btn
+                    st.session_state["result"] = result
                     st.success("تم تحسين الميتا.")
                     st.write(f"**العنوان (Title):** {meta.get('title', '')}")
                     st.write(f"**الوصف (Description):** {meta.get('description', '')}")
@@ -180,8 +201,8 @@ if st.button("🚀 إنشاء المقال"):
         json_bytes = to_json_bytes(
             article_markdown=result["article"],
             meta=meta,
-            keyword=keyword.strip(),
-            related_keywords=related_keywords,
+            keyword=st.session_state["keyword"],
+            related_keywords=st.session_state["related_keywords"],
         )
 
         st.download_button(
@@ -208,8 +229,8 @@ if st.button("🚀 إنشاء المقال"):
     if inventory:
         st.subheader("🔗 اقتراح روابط داخلية")
         suggestions = suggest_internal_links(
-            keyword=keyword.strip(),
-            related_keywords=related_keywords,
+            keyword=st.session_state["keyword"],
+            related_keywords=st.session_state["related_keywords"],
             article_markdown=result["article"],
             inventory=inventory,
             top_k=6,
@@ -258,4 +279,37 @@ if st.button("🚀 إنشاء المقال"):
     else:
         st.caption("لم يتم إدخال مقالات سابقة للمقارنة الأسلوبية.")
 
-    st.success("✅ تم إنشاء المقال بنجاح — راجع وعدّل ثم صدّر بالصيغة التي تريدها.")
+    # ===== تحرير قسم محدد (Regenerate Section) =====
+    st.markdown("---")
+    st.subheader("✍️ إعادة توليد قسم محدد")
+
+    secs = list_sections(result["article"])
+    if not secs:
+        st.caption("لا توجد عناوين H2/H3 لاختيار قسم.")
+    else:
+        titles = [t for (t, lvl, s, e) in secs]
+        selected = st.selectbox("اختر قسمًا لإعادة توليده:", titles, index=0)
+        if selected:
+            preview = extract_section_text(result["article"], selected)
+            with st.expander("معاينة القسم الحالي"):
+                st.markdown(preview)
+
+            if st.button("🔁 إعادة توليد هذا القسم"):
+                with st.spinner("يعاد توليد القسم المحدد…"):
+                    try:
+                        new_article = regenerate_section(
+                            article_md=result["article"],
+                            section_title=selected,
+                            keyword=st.session_state["keyword"],
+                            related_keywords=st.session_state["related_keywords"],
+                            tone=st.session_state["tone"],
+                        )
+                        # تحديث الحالة والعرض
+                        result["article"] = new_article
+                        st.session_state["result"] = result
+                        st.success("✅ تم تحديث القسم بنجاح.")
+                        st.markdown(new_article)
+                    except Exception as e:
+                        st.error(f"تعذّرت إعادة توليد القسم: {e}")
+
+    st.success("✅ المقال جاهز مع إمكانية إعادة توليد أي قسم دون إعادة كتابة المقال بالكامل.")
