@@ -1,7 +1,7 @@
 # utils/quality_checks.py
 # ---------------------------------------------------
 # فحوصات محلية (هيوريستك) لجودة المقال:
-# - كشف العبارات الجازمة (تستبدل بصيغ احتمالية على الأقل تنبيهًا).
+# - كشف العبارات الجازمة (تنبيه للتحويل إلى احتمالية).
 # - كشف الجمل الحشوية/العامة قليلة القيمة.
 # - التحقق من وجود التنويه (Disclaimer).
 # - التحقق من وجود الأقسام الإلزامية المقترحة.
@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List
 
-# عبارات جزم/قطع (وسنقترح بدائل احتمالية)
+# عبارات جزم/قطع (سنقترح بدائل احتمالية)
 CERTAINTY_PATTERNS = [
     r"\b(دائمًا|دوماً|حتماً|حتمًا|بالضرورة|لا\ شك|لا شكّ|مؤكد|مؤكّد|سيحدث|لا بد|أبدًا)\b",
 ]
@@ -25,10 +25,10 @@ PROBABILITY_TOKENS = [
     r"\bبحسب السياق\b", r"\bفي الغالب\b", r"\bأحيانًا\b"
 ]
 
-# مؤشرات حشو/عموميات (قابلة للتخصيص)
+# مؤشرات حشو/عموميات
 FILLER_PATTERNS = [
     r"هذا الموضوع .* (مهم|يشغل|يهم) .*",
-    r"(في الختام|خلاصة القول|وفي النهاية)[:,]?\s*$",     # خاتمة نمطية
+    r"(في الختام|خلاصة القول|وفي النهاية)[:,]?\s*$",
     r"من المعروف أن .*", r"لا يخفى على أحد .*",
     r"يعتبر .* من المواضيع .*",
 ]
@@ -42,10 +42,10 @@ REQUIRED_SECTIONS = {
     "تنويه": r"(?i)(تنويه|Disclaimer|إخلاء\s+مسؤولية)",
 }
 
-# مؤشرات PAA ضمن المتن (أسئلة مدمجة)
+# مؤشرات PAA ضمن المتن
 PAA_HINTS = [
-    r"؟\s*$",                                # أسئلة تنتهي بعلامة استفهام كسطر
-    r"(?i)يسأل\s+الناس|يتساءل\s+الكثيرون",   # صياغات شائعة
+    r"؟\s*$",
+    r"(?i)يسأل\s+الناس|يتساءل\s+الكثيرون",
     r"(?i)س(?:ؤال|ؤالات)\s+شائعة",
 ]
 
@@ -67,10 +67,6 @@ def _count_matches(patterns: List[str], text: str) -> int:
     return total
 
 
-def _has_any(patterns: List[str], text: str) -> bool:
-    return _count_matches(patterns, text) > 0
-
-
 def _has_disclaimer(text: str) -> bool:
     pat = REQUIRED_SECTIONS["تنويه"]
     return re.search(pat, text or "") is not None
@@ -85,7 +81,10 @@ def _missing_required_sections(text: str) -> List[str]:
 
 
 def _paa_signals(text: str) -> int:
-    return _count_matches(PAA_HINTS, text)
+    total = 0
+    for p in PAA_HINTS:
+        total += len(re.findall(p, text or "", flags=re.MULTILINE))
+    return total
 
 
 def _probability_lexicon_hits(text: str) -> int:
@@ -95,7 +94,7 @@ def _probability_lexicon_hits(text: str) -> int:
 def run_quality_report(text: str, expected_length_preset: str | None = None) -> Dict:
     """
     يعيد تقريرًا موجزًا مع توصيات قابلة للتنفيذ.
-    expected_length_preset: one of {"short","medium","long"} لتقدير نطاق الكلمات المناسب.
+    expected_length_preset: one of {"short","medium","long"} لتقدير نطاق الكلمات والعناوين.
     """
     text = text or ""
     words = _count_words(text)
@@ -117,7 +116,7 @@ def run_quality_report(text: str, expected_length_preset: str | None = None) -> 
     }
     target = target_ranges.get(expected_length_preset, None)
 
-    # تقييم المخاطر بشكل بسيط
+    # تقييم مخاطر بسيط
     risk_points = 0
     if certainty_hits > 0: risk_points += 2
     if filler_hits > 1: risk_points += 2
