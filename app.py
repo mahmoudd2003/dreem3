@@ -1,14 +1,16 @@
 # app.py
 # ===========================
 # واجهة Streamlit لنظام كتابة مقالات تفسير الأحلام
-# تعتمد على:
+# يعتمد على:
 # - utils/openai_client.py  (دالة generate_article)
 # - utils/exporters.py      (تصدير Markdown/DOCX/JSON)
+# - utils/quality_checks.py (تقرير الجودة التفصيلي)
 # ===========================
 
 import streamlit as st
 from utils.openai_client import generate_article
 from utils.exporters import to_markdown, to_docx_bytes, to_json_bytes
+from utils.quality_checks import run_quality_report
 
 # إعداد الصفحة
 st.set_page_config(
@@ -96,6 +98,29 @@ if st.button("🚀 إنشاء المقال"):
         st.write(f"- **Outline مُستخدم؟** {'نعم' if qn.get('outline_used') else 'لا'}")
         st.write("**قواعد مُطبّقة:**")
         st.write(", ".join(qn.get("enforced_rules", [])))
+
+        # تقرير الجودة التفصيلي
+        st.subheader("🧪 تقرير Quality Gates (تفصيلي)")
+        rep = run_quality_report(result["article"], expected_length_preset=length_preset)
+
+        # عرض نقاط أساسية
+        st.write(f"**مستوى المخاطر:** {rep.get('risk_level')}")
+        m = rep.get("metrics", {})
+        st.write(
+            f"- كلمات: {m.get('words')} | H2: {m.get('h2_count')} | H3: {m.get('h3_count')}\n"
+            f"- عبارات جزم: {m.get('certainty_hits')} | حشو: {m.get('filler_hits')} | مفردات احتمالية: {m.get('probability_lexicon_hits')}\n"
+            f"- تنويه موجود؟ {'نعم' if m.get('disclaimer_present') else 'لا'} | أقسام ناقصة: {', '.join(m.get('missing_sections', [])) or 'لا يوجد'}\n"
+            f"- إشارات PAA: {m.get('paa_signals')}"
+        )
+
+        # توصيات عملية
+        actions = rep.get("suggested_actions", [])
+        if actions:
+            st.write("**توصيات إصلاح:**")
+            for a in actions:
+                st.write(f"• {a}")
+        else:
+            st.write("لا توجد توصيات إضافية — المقال متوازن 👍")
 
         # أزرار التصدير
         st.subheader("📤 تصدير")
