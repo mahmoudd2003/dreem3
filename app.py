@@ -11,6 +11,7 @@
 # - utils/section_tools.py    (تحرير/إعادة توليد قسم محدد)
 # - utils/text_cleanup.py     (فلترة/تحسينات لغوية)
 # - utils/heading_tools.py    (Normalize Headings)
+# - utils/enhanced_fix.py     (دفعة إصلاح مُحسّنة)
 # ===========================
 
 import re
@@ -24,6 +25,7 @@ from utils.style_diversity import style_diversity_report
 from utils.section_tools import list_sections, extract_section_text, regenerate_section
 from utils.text_cleanup import clean_article
 from utils.heading_tools import normalize_headings
+from utils.enhanced_fix import run_enhanced_fix
 
 # إعداد الصفحة
 st.set_page_config(
@@ -330,7 +332,7 @@ if st.session_state["result"]:
             st.markdown("**المقال بعد التطبيع:**")
             st.markdown(result["article"])
 
-    # ===== دفعة إصلاح تلقائية =====
+    # ===== دفعة إصلاح (النسخة الأساسية) =====
     st.markdown("---")
     st.subheader("🚑 دفعة إصلاح (تنظيف + Normalize + خاتمة مسؤولة)")
 
@@ -349,7 +351,7 @@ if st.session_state["result"]:
             st.error("لا يوجد مقال مُولد بعد.")
         else:
             with st.spinner("تطبيق الدفعة…"):
-                # 1) تنظيف لغوي
+                # 1) تنظيف
                 cleaned = clean_article(
                     result["article"],
                     remove_filler=fx_remove_filler,
@@ -374,7 +376,7 @@ if st.session_state["result"]:
                 article_fx = nh["normalized"]
                 rep_head = nh["changes"]
 
-                # 3) إعادة توليد "الخاتمة" (مسؤولة + تنويه مهني)
+                # 3) إعادة توليد الخاتمة
                 secs = list_sections(article_fx)
                 outro_title = None
                 for t, lvl, s, e in secs:
@@ -400,7 +402,6 @@ if st.session_state["result"]:
                     fx_outro_done = False
                     st.info("لم يتم العثور على قسم «خاتمة». تخطّينا خطوة إعادة توليد الخاتمة.")
 
-                # تحديث الحالة والعرض
                 result["article"] = article_fx
                 st.session_state["result"] = result
 
@@ -412,6 +413,62 @@ if st.session_state["result"]:
                 f"- خاتمة مسؤولة: {'تمت' if fx_outro_done else 'تخطّينا/تعذّر'}"
             )
             st.markdown("**المقال بعد الدفعة:**")
+            st.markdown(result["article"])
+
+    # ===== دفعة إصلاح مُحسّنة =====
+    st.markdown("---")
+    st.subheader("🛠️ دفعة إصلاح مُحسّنة (تنظيف + Normalize + تقليل الجزم + إضافة 'متى لا ينطبق' + خاتمة مسؤولة)")
+
+    col_efx_a, col_efx_b = st.columns(2)
+    with col_efx_a:
+        efx_fix_punct = st.checkbox("تصحيح الترقيم/المسافات", value=True, key="efx_fix_punct")
+        efx_remove_filler = st.checkbox("إزالة الحشو الواضح", value=True, key="efx_remove_filler")
+        efx_normalize_ws = st.checkbox("تطبيع المسافات والأسطر", value=True, key="efx_normalize_ws")
+    with col_efx_b:
+        efx_h1_to_h2 = st.checkbox("H1→H2", value=True, key="efx_h1_to_h2")
+        efx_h4_to_h3 = st.checkbox("H4+→H3", value=True, key="efx_h4_to_h3")
+        efx_autonumber = st.checkbox("ترقيم تلقائي H2/H3", value=False, key="efx_autonumber")
+
+    if st.button("🛠️ طبّق الدفعة المُحسّنة الآن"):
+        if not result or not result.get("article"):
+            st.error("لا يوجد مقال مُولد بعد.")
+        else:
+            with st.spinner("تطبيق الدفعة المُحسّنة…"):
+                fx = run_enhanced_fix(
+                    result["article"],
+                    keyword=st.session_state.get("keyword", ""),
+                    related_keywords=st.session_state.get("related_keywords", []),
+                    tone=st.session_state.get("tone", "هادئة"),
+                    clean_opts={
+                        "remove_filler": efx_remove_filler,
+                        "aggressive": False,
+                        "fix_punct": efx_fix_punct,
+                        "normalize_ws": efx_normalize_ws,
+                    },
+                    heading_opts={
+                        "h1_to_h2": efx_h1_to_h2,
+                        "h4plus_to_h3": efx_h4_to_h3,
+                        "unify_space_after_hash": True,
+                        "trim_trailing_punct": True,
+                        "collapse_spaces": True,
+                        "remove_consecutive_duplicates": True,
+                        "autonumber": efx_autonumber,
+                    }
+                )
+                result["article"] = fx["article"]
+                st.session_state["result"] = result
+
+            st.success("✅ تم تطبيق الدفعة المُحسّنة.")
+            rep = fx["reports"]
+            st.write("**ملخص الدفعة المُحسّنة:**")
+            st.write(
+                f"- تنظيف: حذف/قص الحشو = {rep['clean']['filler_removed']} | تكرار ترقيم = {rep['clean']['repeated_punct_collapsed']} | فواصل عربية = {rep['clean']['arabic_comma_applied']}\n"
+                f"- Normalize: H1→H2 = {rep['headings']['h1_to_h2']} | H4+→H3 = {rep['headings']['h4plus_to_h3']} | حذف مكرر = {rep['headings']['deduped_headings']} | ترقيم تلقائي = {rep['headings']['autonumbered']}\n"
+                f"- تقليل الجزم: استبدالات = {rep['soften']['replacements_count']}\n"
+                f"- إدراج 'متى لا ينطبق؟': {'تم' if rep['not_applicable_inserted'] else 'كان موجودًا'}\n"
+                f"- خاتمة مسؤولة: {'تمت' if rep['outro_regenerated'] else 'تخطّينا/تعذّر'}"
+            )
+            st.markdown("**المقال بعد الدفعة المُحسّنة:**")
             st.markdown(result["article"])
 
     # ===== اقتراح الروابط الداخلية =====
@@ -559,4 +616,4 @@ if st.session_state["result"]:
                     except Exception as e:
                         st.error(f"تعذّرت إعادة توليد القسم: {e}")
 
-    st.success("✅ المقال جاهز — أنشئ، نظّف، طبّع العناوين، طبّق الدفعة، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
+    st.success("✅ المقال جاهز — أنشئ، نظّف، طبّع العناوين، طبّق الدفعات، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
