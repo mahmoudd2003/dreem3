@@ -3,6 +3,7 @@
 # واجهة موحّدة للتعامل مع OpenAI
 # - Two-pass generation (Outline -> Article) مع خيار قفل الـ Outline
 # - قوالب Outline داخلية: modern | classic | none (outline_mode)
+# - توزيع طول ذكي per-section (section_weights profiles)
 # - التزام بالطول مع expand_to_target
 # - verify_and_correct_structure لمطابقة العناوين
 # - Post-processing مرن لإضافة أقسام ناقصة (أقوال المفسرين / مصادر / خاتمة مسؤولة)
@@ -31,6 +32,13 @@ from utils.sources_loader import (
     load_all_sources,
     pick_sources_for_article,
     format_sources_markdown,
+)
+
+# استيراد أوزان الأقسام وتلميحات الميزانية
+from utils.section_weights import (
+    compute_targets,
+    format_targets_hint,
+    format_cases_hint,
 )
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1")
@@ -161,6 +169,13 @@ def build_article_prompt(
         "اكتب مقال Markdown بالعناوين التالية (H2) بالترتيب:\n" + "\n".join(sections) + "\n\n"
         "[قائمة تحقق — إلزم بها]\n" + "\n".join(hard) + "\n"
     )
+
+    # === حقن ميزانية الكلمات وفق بروفايل الأوزان ===
+    total = length_max  # نستخدم الحد الأعلى كهدف تقريبي
+    targets = compute_targets(total_words=total, profile_name=os.getenv("SECTION_PROFILE", "modern_slim"))
+    hint = format_targets_hint(targets) + "\n" + format_cases_hint(per_case_words=90)
+    user = user + "\n" + hint + "\n"
+
     return {"system": system, "user": user, "sections": sections,
             "length_min": length_min, "length_max": length_max}
 
@@ -195,6 +210,13 @@ def build_from_outline_prompt(
         f"- FAQ (إن وجد): ≤ {faq_count} أسئلة بصيغة س/ج قصيرة.\n"
         "- تنويه مهني في الخاتمة.\n"
     )
+
+    # === حقن ميزانية الكلمات وفق بروفايل الأوزان ===
+    total = length_max
+    targets = compute_targets(total_words=total, profile_name=os.getenv("SECTION_PROFILE", "modern_slim"))
+    hint = format_targets_hint(targets) + "\n" + format_cases_hint(per_case_words=90)
+    user = user + "\n" + hint + "\n"
+
     return {"system": system, "user": user, "normalized_outline": normalized_outline,
             "length_min": length_min, "length_max": length_max}
 
