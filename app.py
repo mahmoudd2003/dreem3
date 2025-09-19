@@ -2,7 +2,7 @@
 # ===========================
 # واجهة Streamlit لنظام كتابة مقالات تفسير الأحلام
 # يعتمد على:
-# - utils/openai_client.py    (generate_article + Two-pass + enforce_outline)
+# - utils/openai_client.py    (generate_article + Two-pass + enforce_outline + outline_mode)
 # - utils/exporters.py        (تصدير Markdown/DOCX/JSON)
 # - utils/quality_checks.py   (تقرير الجودة التفصيلي)
 # - utils/meta_generator.py   (مولّد الميتا الذكي)
@@ -37,7 +37,7 @@ st.set_page_config(
 st.title("📝 نظام كتابة مقالات تفسير الأحلام")
 st.markdown(
     "أدخل الكلمة المفتاحية والكلمات المرتبطة، واختر طول المقال. "
-    "يمكنك أيضًا تفعيل إنشاء Outline قبل الكتابة وقفل الالتزام به حرفيًا."
+    "يمكنك أيضًا اختيار قالب Outline مدمج بالنظام أو تجاهله."
 )
 
 # ===== إدخالات المستخدم =====
@@ -56,11 +56,15 @@ length_option_label = st.radio(
 
 tone = st.selectbox("🎙️ النبرة", ["هادئة", "قصصية", "تحليلية"])
 
+# قالب الـ Outline المضمن في النظام
+outline_mode = st.selectbox("📐 قالب الـ Outline (مضمن داخل النظام)", ["modern", "classic", "none"], index=0)
+
 col_outline_a, col_outline_b = st.columns(2)
 with col_outline_a:
-    include_outline = st.toggle("📐 إنشاء Outline قبل كتابة المقال", value=False)
+    include_outline = st.toggle("📐 إنشاء Outline قبل كتابة المقال (واجهة)", value=False)
 with col_outline_b:
-    enforce_outline = st.checkbox("🔒 استخدم الـ Outline حرفيًا (إن وُجد)", value=True)
+    enforce_outline = st.checkbox("🔒 استخدم الـ Outline حرفيًا (واجهة)", value=True)
+st.caption("ملاحظة: إذا اخترت قالبًا مضمّنًا (modern/classic)، سيتم قفل الـ Outline داخليًا بغض النظر عن إعدادات الواجهة.")
 
 # مخزون الروابط الداخلية (اختياري)
 st.markdown("### 🧭 مخزون الروابط الداخلية (اختياري)")
@@ -136,7 +140,7 @@ if st.button("🚀 إنشاء المقال"):
                 related_keywords=related_keywords,
                 length_preset=length_preset,   # short/medium/long
                 tone=tone,                     # هادئة/قصصية/تحليلية
-                include_outline=include_outline,
+                include_outline=include_outline,   # واجهة (سيُتجاهل إن outline_mode != "none")
                 enable_editor_note=enable_editor_note,
                 enable_not_applicable=enable_not_applicable,
                 enable_methodology=enable_methodology,
@@ -146,7 +150,8 @@ if st.button("🚀 إنشاء المقال"):
                 enable_comparison=enable_comparison,
                 scenarios_count=scenarios_count,
                 faq_count=faq_count,
-                enforce_outline=enforce_outline,   # <<< الجديد
+                enforce_outline=enforce_outline,   # واجهة (سيُفرض داخليًا عند modern/classic)
+                outline_mode=outline_mode,         # <<< القالب المضمّن
             )
         except Exception as e:
             st.error(f"حدث خطأ أثناء التوليد: {e}")
@@ -174,8 +179,8 @@ if st.session_state["result"]:
     col1, col2 = st.columns([2, 1], gap="large")
 
     with col1:
-        if include_outline and result.get("outline"):
-            st.subheader("📐 Outline المقترح")
+        if result.get("outline"):
+            st.subheader("📐 Outline المستخدم (من النظام)")
             st.markdown(result["outline"])
 
         st.subheader("📄 المقال الناتج")
@@ -543,14 +548,14 @@ if st.session_state["result"]:
 
         # أزرار سريعة
         quick_defs = [
-            ("افتتاحية", "intro",  None, [r"افتتاحية"]),
+            ("افتتاحية", "intro",  None, [r"افتتاحية", r"خلاصة\s+سريعة"]),
             ("لماذا قد يظهر الرمز؟", "why", None, [r"لماذا\s+قد\s+يظهر\s+الرمز\؟?"]),
             ("متى لا ينطبق التفسير؟", "not_applicable", None, [r"متى\s+لا\s+ينطبق\s+التفسير\؟?"]),
             ("سيناريوهات واقعية", "scenarios", st.session_state.get("scenarios_count", 3), [r"سيناريوهات\s+واقعية"]),
             ("أسئلة شائعة", "faq", st.session_state.get("faq_count", 4), [r"أسئلة\s+شائعة"]),
             ("مقارنة دقيقة", "comparison", None, [r"مقارنة\s+دقيقة"]),
             ("منهجية التفسير", "methodology", None, [r"منهجية\s+التفسير"]),
-            ("خاتمة", "outro", None, [r"خاتمة", r"الخلاصة"]),
+            ("خاتمة", "outro", None, [r"خاتمة", r"الخلاصة"])
         ]
 
         st.write("**أزرار سريعة:**")
@@ -559,7 +564,6 @@ if st.session_state["result"]:
             col = cols[i % 4]
             with col:
                 if st.button(label):
-                    # البحث عن العنوان المطابق
                     picked_title = None
                     for t in titles:
                         for pat in patterns:
@@ -573,6 +577,9 @@ if st.session_state["result"]:
                     else:
                         with st.spinner(f"إعادة توليد قسم: {picked_title} …"):
                             try:
+                                kwargs = {}
+                                if sec_type in ("scenarios", "faq") and target_count:
+                                    kwargs["target_count"] = target_count
                                 new_article = regenerate_section(
                                     article_md=result["article"],
                                     section_title=picked_title,
@@ -580,7 +587,7 @@ if st.session_state["result"]:
                                     related_keywords=st.session_state.get("related_keywords", []),
                                     tone=st.session_state.get("tone", "هادئة"),
                                     section_type=sec_type,
-                                    # تم تمرير target_count لِـfaq/scenarios تلقائيًا داخل الدالة (إن كانت تدعمه)
+                                    **kwargs
                                 )
                                 result["article"] = new_article
                                 st.session_state["result"] = result
@@ -604,7 +611,6 @@ if st.session_state["result"]:
         if st.button("🔁 أعد توليد القسم المحدد"):
             with st.spinner("يتم إعادة توليد القسم..."):
                 try:
-                    # تمرير العدد إن أُدخل
                     extra_kwargs = {}
                     if manual_type in ("scenarios", "faq"):
                         try:
