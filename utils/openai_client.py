@@ -1,10 +1,12 @@
 # utils/openai_client.py
 # =====================================================
-# واجهة موحّدة للتعامل مع OpenAI (توافق بين إصدارات SDK)
-# - chat_complete: نداء دردشة عام مع طبقة توافق max_output_tokens/max_tokens
-# - build_article_prompt: برومبت مضبوط + قائمة تحقق للطول
-# - generate_article: توليد المقال (+ Outline اختياري) + توسيع تلقائي
-# - expand_to_target: يعمّق المقال إن كان أقصر من الحد الأدنى
+# واجهة موحّدة للتعامل مع OpenAI (متوافقة مع إصدارات SDK المختلفة)
+# الميزات:
+# - chat_complete: طبقة توافق بين max_output_tokens / max_tokens
+# - Two-pass generation: توليد Outline ثم ملء المحتوى
+# - enforce_outline: قفل الـ Outline حرفيًا وعدم السماح بتغييره
+# - التزام بالطول عبر قائمة تحقق + مرحلة توسيع تلقائية expand_to_target
+# - verify_and_correct_structure: فحص/تصحيح تطابق العناوين مع الـ Outline
 # =====================================================
 
 from __future__ import annotations
@@ -22,10 +24,10 @@ except Exception:
 
 client = OpenAI()
 
-# اضبط اسم الموديل من البيئة أو استخدم افتراضي
+# اسم الموديل
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
-# خرائط الطول
+# خرائط الطول المستهدفة
 LENGTH_TARGETS: Dict[str, Tuple[int, int]] = {
     "short":  (600,  800),
     "medium": (900,  1200),
@@ -34,11 +36,43 @@ LENGTH_TARGETS: Dict[str, Tuple[int, int]] = {
 
 # أدوات مساعدة
 _WORD_RE = re.compile(r"[A-Za-z\u0600-\u06FF]+", re.UNICODE)
+_HX_RE   = re.compile(r"^(#{2,6})\s*(.+?)\s*$", re.UNICODE)  # لأي H2..H6
+
 def _word_count(text: str) -> int:
     return len(_WORD_RE.findall(text or ""))
 
 def _safe_join_keywords(keywords: List[str]) -> str:
     return ", ".join([k.strip() for k in keywords if k and k.strip()]) or "لا يوجد"
+
+def _extract_h2_h3_titles(md: str) -> List[str]:
+    """يستخرج قائمة عناوين H2/H3 بالترتيب."""
+    titles = []
+    for line in (md or "").splitlines():
+        m = _HX_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            title = m.group(2).strip()
+            if level in (2, 3):
+                titles.append(title)
+    return titles
+
+def _normalize_outline_md(outline_md: str) -> str:
+    """
+    يضمن أن خطوط الـ Outline تبدأ بـ ## أو ###.
+    في حال أعاد النموذج نقاط بدون ##، نرفعها إلى H2.
+    """
+    fixed_lines = []
+    for ln in (outline_md or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            # اترك العناوين كما هي
+            fixed_lines.append(s)
+        else:
+            # حوّل أي سطر نصي إلى H2
+            fixed_lines.append("## " + s.lstrip("-• ").strip())
+    return "\n".join(fixed_lines).strip()
 
 # ---------------------------------
 # واجهة دردشة + طبقة توافق
@@ -63,7 +97,6 @@ def chat_complete(
             max_output_tokens=max_output_tokens,
         )
     except TypeError:
-        # طبقة توافق لإصدارات SDK الأقدم
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -73,7 +106,7 @@ def chat_complete(
     return resp.choices[0].message.content or ""
 
 # ---------------------------------
-# بناء برومبت المقال
+# برومبت عام (بدون Outline مُقفل)
 # ---------------------------------
 def build_article_prompt(
     *,
@@ -92,6 +125,10 @@ def build_article_prompt(
     scenarios_count: int,
     faq_count: int,
 ) -> Dict[str, Any]:
+    """
+    برومبت كتابة المقال مع قائمة تحقق للطول والبنية (عناوين افتراضية).
+    يُستخدم عندما لا نريد قفل Outline حرفيًا.
+    """
     length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
     rk = _safe_join_keywords(related_keywords)
 
@@ -116,12 +153,11 @@ def build_article_prompt(
     sections.append("## خاتمة")
 
     system = (
-        "أنت محرر عربي محترف يكتب مقالات تفسير أحلام بشرية الطابع.\n"
-        "التزم بالآتي:\n"
-        "- لغة بسيطة مباشرة، جمل قصيرة وفقرات منسّقة.\n"
-        "- صياغة احتمالية دائمًا (قد/يُحتمل/بحسب السياق)، ومنع الجزم والوعود/التنبؤات.\n"
-        "- تمييز الرأي المعاصر عن النقل التراثي عند ذكره.\n"
-        "- لا نصائح طبية/نفسية/مالية قاطعة. احترام الحساسية الدينية.\n"
+        "أنت محرر عربي محترف يكتب مقالات تفسير أحلام بشرية.\n"
+        "- لغة بسيطة مباشرة، جُمل قصيرة وفقرات منسّقة.\n"
+        "- صياغة احتمالية (قد/يُحتمل/بحسب السياق)، منع الجزم والوعود.\n"
+        "- تمييز الرأي المعاصر عن النقل التراثي.\n"
+        "- لا نصائح طبية/نفسية/مالية قاطعة؛ احترام الحساسية الدينية.\n"
         "- تضمين تنويه مهني واضح في الخاتمة.\n"
         "- لا حشو ولا تكرار.\n"
     )
@@ -131,15 +167,15 @@ def build_article_prompt(
         "- لا يقل كل قسم أساسي (افتتاحية/لماذا/خاتمة) عن 120–180 كلمة.",
     ]
     if enable_not_applicable:
-        hard_constraints.append("- قسم «متى لا ينطبق التفسير؟»: 3–5 نقاط واقعية لتقليل التعميم.")
+        hard_constraints.append("- «متى لا ينطبق التفسير؟»: 3–5 نقاط واقعية لتقليل التعميم.")
     if enable_scenarios:
         hard_constraints.append(f"- سيناريوهات واقعية: {scenarios_count} عناصر، كل عنصر ≤ سطرين مع تعليق موجز.")
     if enable_faq:
-        hard_constraints.append(f"- أسئلة شائعة: {faq_count} أسئلة، سؤال ≤ 12 كلمة، جواب ≤ 30 كلمة، تنسيق (**س:**/**ج:**).")
+        hard_constraints.append(f"- أسئلة شائعة: {faq_count} أسئلة، سؤال ≤ 12 كلمة، جواب ≤ 30 كلمة بصيغة (**س:**/**ج:**).")
     if enable_comparison:
-        hard_constraints.append("- مقارنة دقيقة: 2–3 فروق جوهرية بصياغة نقاط قصيرة.")
+        hard_constraints.append("- مقارنة دقيقة: 2–3 فروق جوهرية كنقاط قصيرة.")
     if enable_methodology:
-        hard_constraints.append("- منهجية التفسير: فقرة توضّح الجمع بين التراث + علم نفس الأحلام + سياق القارئ وحدود التفسير.")
+        hard_constraints.append("- منهجية التفسير: فقرة توضّح التراث + علم نفس الأحلام + سياق القارئ وحدود التفسير.")
     if enable_sources:
         hard_constraints.append("- مصادر صريحة: 3–6 مراجع؛ استخدم «بحاجة مراجعة بشرية» عند الشك.")
     if enable_editor_note:
@@ -148,17 +184,17 @@ def build_article_prompt(
     user = (
         f"الكلمة المفتاحية: {keyword}\n"
         f"الكلمات المرتبطة: {rk}\n"
-        f"النبرة المستهدفة: {tone}\n\n"
-        "اكتب مقالًا بصيغة Markdown بالعناوين التالية (H2) مرتّبة كما هي:\n"
+        f"النبرة: {tone}\n\n"
+        "اكتب مقالًا بصيغة Markdown بالعناوين التالية (H2) بالترتيب:\n"
         + "\n".join(sections) + "\n\n"
-        "[قائمة تحقق صريحة — لا تُهملها]\n"
+        "[قائمة تحقق — إلزم بها]\n"
         + "\n".join(hard_constraints) + "\n\n"
-        "تذكير مهم:\n"
-        "- اشرح «لماذا قد يظهر الرمز» نفسيًا/اجتماعيًا عند اللزوم.\n"
+        "تذكير:\n"
+        "- فسّر «لماذا قد يظهر الرمز» نفسيًا/اجتماعيًا.\n"
         "- أدرج نصائح تهدئة ومتى أستشير مختصًا عند القلق.\n"
-        "- «ما الذي لا يعنيه الحلم؟» تُدمج ضمن الأقسام الملائمة لتبديد المعتقدات الشائعة.\n"
-        "- أدرج أمثلة واقعية مُقننة وFAQ قصير إذا كانت الأقسام مفعّلة.\n"
-        "- لا تضف H1 داخل النص؛ العنوان الرئيسي خارج الماركداون.\n"
+        "- «ما الذي لا يعنيه الحلم؟» لتبديد معتقدات شائعة.\n"
+        "- أمثلة واقعية مُقننة وFAQ قصير إذا كانت الأقسام مفعّلة.\n"
+        "- لا تضع H1 داخل النص.\n"
     )
 
     return {
@@ -170,7 +206,58 @@ def build_article_prompt(
     }
 
 # ---------------------------------
-# توسيع المقال إن كان أقصر من المطلوب
+# برومبت البناء من Outline مقفول
+# ---------------------------------
+def build_from_outline_prompt(
+    *,
+    outline_md: str,
+    keyword: str,
+    related_keywords: List[str],
+    length_preset: str,
+    tone: str,
+    scenarios_count: int,
+    faq_count: int,
+) -> Dict[str, Any]:
+    """
+    يبني برومبت يوجب الالتزام التام بالـ Outline المُمرّر (H2/H3) دون أي تعديل.
+    """
+    length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
+    rk = _safe_join_keywords(related_keywords)
+    normalized_outline = _normalize_outline_md(outline_md)
+
+    system = (
+        "أنت محرر عربي محترف. اكتب مقالًا يلتزم حرفيًا بالعناوين (H2/H3) التالية دون أي تغيير في النص أو الترتيب.\n"
+        "- يُمنع إضافة/حذف/إعادة تسمية أي عنوان.\n"
+        "- املأ كل عنوان بمحتوى متوازن وبشري، صياغة احتمالية، بلا حشو.\n"
+        "- لا تضع H1.\n"
+    )
+
+    user = (
+        f"الكلمة المفتاحية: {keyword}\n"
+        f"الكلمات المرتبطة: {rk}\n"
+        f"النبرة: {tone}\n\n"
+        "Outline (التزم به حرفيًا — لا تغييرات في العناوين أو ترتيبها):\n"
+        "-----\n"
+        f"{normalized_outline}\n"
+        "-----\n\n"
+        "[قائمة تحقق للطول والبناء]\n"
+        f"- إجمالي الكلمات بين {length_min} و {length_max} كلمة.\n"
+        "- لا يقل كل قسم أساسي (H2) عن 120–180 كلمة.\n"
+        f"- سيناريوهات واقعية (إن وُجدت في العناوين): ≤ {scenarios_count} عناصر قصيرة مع تعليق.\n"
+        f"- أسئلة شائعة (إن وُجدت): ≤ {faq_count} أسئلة (س ≤ 12 كلمة، ج ≤ 30 كلمة).\n"
+        "- تنويه مهني واضح في الخاتمة.\n"
+    )
+
+    return {
+        "system": system,
+        "user": user,
+        "normalized_outline": normalized_outline,
+        "length_min": length_min,
+        "length_max": length_max,
+    }
+
+# ---------------------------------
+# توسيع المقال إذا كان أقصر من المطلوب
 # ---------------------------------
 def expand_to_target(
     article_md: str,
@@ -189,7 +276,7 @@ def expand_to_target(
     system = (
         "أنت محرر يعمّق المقال دون تغيير هيكله أو عناوينه.\n"
         "وسّع كل قسم بمحتوى تطبيقي وأمثلة موجزة وأسئلة/إجابات قصيرة عند الحاجة، "
-        "مع الحفاظ على نفس العناوين وترتيبها وصياغة احتمالية، ومنع الحشو والجزم."
+        "مع الحفاظ على نفس العناوين وترتيبها وصياغة احتمالية، وتجنّب الحشو والجزم."
     )
     user = (
         f"الكلمة المفتاحية: {keyword}\n"
@@ -211,7 +298,51 @@ def expand_to_target(
     return new_article
 
 # ---------------------------------
-# توليد المقال
+# فحص/تصحيح البنية مقابل Outline
+# ---------------------------------
+def verify_and_correct_structure(
+    *,
+    article_md: str,
+    outline_md: str,
+    model: str = MODEL_NAME,
+) -> str:
+    """
+    يتحقق أن جميع عناوين H2/H3 في المقال تطابق الـ Outline حرفيًا وبالترتيب.
+    إن وجد اختلاف (نقص/زيادة/إعادة تسمية)، يطلب تصحيحًا آليًا.
+    """
+    norm_outline = _normalize_outline_md(outline_md)
+    target_titles = _extract_h2_h3_titles(norm_outline)
+    produced_titles = _extract_h2_h3_titles(article_md)
+
+    if produced_titles == target_titles:
+        return article_md  # لا حاجة للتصحيح
+
+    # نطلب تصحيحًا دقيقًا
+    system = (
+        "أنت محرر دقيق. صحّح البنية لتطابق الـ Outline تمامًا (H2/H3) دون تغيير نص/ترتيب العناوين.\n"
+        "انقل/ادمج الفقرات تحت العنوان الصحيح عند الحاجة. لا تضف عناوين جديدة."
+    )
+    user = (
+        "Outline المطلوب (التزم حرفيًا):\n"
+        "-----\n" + norm_outline + "\n-----\n\n"
+        "المقال الحالي (بحاجة تصحيح بنية):\n"
+        "-----\n" + article_md + "\n-----\n"
+        "أعد النص كاملًا بعد التصحيح."
+    )
+    fixed = chat_complete(
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=0.2,
+        max_output_tokens=3000,
+        model=model,
+    ).strip()
+
+    # تأكيد سريع بعد التصحيح
+    if _extract_h2_h3_titles(fixed) == target_titles:
+        return fixed
+    return article_md  # كاحتياط، أعد القديم إن ظلّ هناك اختلاف
+
+# ---------------------------------
+# توليد المقال (مع Two-pass و enforce_outline)
 # ---------------------------------
 def generate_article(
     *,
@@ -229,78 +360,64 @@ def generate_article(
     enable_comparison: bool,
     scenarios_count: int = 3,
     faq_count: int = 4,
+    enforce_outline: bool = False,   # <<< الخيار الجديد: قفل الـ Outline
     model: str = MODEL_NAME,
 ) -> Dict[str, Any]:
-    prompt = build_article_prompt(
-        keyword=keyword,
-        related_keywords=related_keywords,
-        length_preset=length_preset,
-        tone=tone,
-        include_outline=include_outline,
-        enable_editor_note=enable_editor_note,
-        enable_not_applicable=enable_not_applicable,
-        enable_methodology=enable_methodology,
-        enable_sources=enable_sources,
-        enable_scenarios=enable_scenarios,
-        enable_faq=enable_faq,
-        enable_comparison=enable_comparison,
-        scenarios_count=scenarios_count,
-        faq_count=faq_count,
-    )
 
     outline_md = ""
+
+    # (أ) خطوة الـ Outline (اختيارية)
     if include_outline:
         outline_system = (
-            "أنت خبير إعداد مخطط (Outline) لمقال تفسير أحلام. "
-            "أنشئ مخططًا موجزًا من 6–10 عناصر (H2/H3) يراعي البنية المطلوبة."
+            "أنت خبير إعداد Outline لمقال تفسير أحلام.\n"
+            "أنتج مخططًا متوازنًا (H2/H3) دون متن، يغطي الزوايا المهمة للقارئ."
         )
         outline_user = (
             f"العنوان المقترح: تفسير {keyword}\n"
             f"الكلمات المرتبطة: {_safe_join_keywords(related_keywords)}\n"
-            "أعطني Outline مختصرًا ومتوازنًا، بدون متن، بصيغة Markdown (عناوين فقط)."
+            "- اجعل العناوين H2 للأقسام الرئيسية وH3 للتفاصيل.\n"
+            "- لا تضف متنًا تحت العناوين.\n"
         )
         outline_md = chat_complete(
             messages=[{"role": "system", "content": outline_system},
                       {"role": "user", "content": outline_user}],
             temperature=0.5,
-            max_output_tokens=700,
+            max_output_tokens=800,
             model=model,
         ).strip()
+        outline_md = _normalize_outline_md(outline_md)
 
-    # التوليد الأساسي
-    messages = [
-        {"role": "system", "content": prompt["system"]},
-        {"role": "user", "content": prompt["user"]},
-    ]
-    first_pass = chat_complete(
-        messages=messages,
-        temperature=0.6,
-        max_output_tokens=3800,
-        model=model,
-    ).strip()
-
-    # توسيع تلقائي حتى بلوغ الحد الأدنى
-    article = expand_to_target(
-        article_md=first_pass,
-        keyword=keyword,
-        related_keywords=related_keywords,
-        length_preset=length_preset,
-        model=model,
-    )
-    # محاولة ثانية نادرة إذا ما زال أقل (احتياط)
-    length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
-    if _word_count(article) < length_min:
-        article = expand_to_target(
-            article_md=article,
+    if include_outline and enforce_outline and outline_md:
+        # (ب) بناء المقال من Outline مقفول
+        P = build_from_outline_prompt(
+            outline_md=outline_md,
             keyword=keyword,
             related_keywords=related_keywords,
             length_preset=length_preset,
+            tone=tone,
+            scenarios_count=scenarios_count,
+            faq_count=faq_count,
+        )
+        messages = [
+            {"role": "system", "content": P["system"]},
+            {"role": "user",   "content": P["user"]},
+        ]
+        first_pass = chat_complete(
+            messages=messages,
+            temperature=0.6,
+            max_output_tokens=3800,
+            model=model,
+        ).strip()
+
+        # تصحيح البنية إن لزم
+        article = verify_and_correct_structure(
+            article_md=first_pass,
+            outline_md=outline_md,
             model=model,
         )
-
-    quality_notes = {
-        "length_target": f"{length_min}-{length_max} كلمة",
-        "sections_target": "؛ ".join([s.replace("## ", "") for s in build_article_prompt(
+    else:
+        # (ج) كتابة مباشرة بدون قفل Outline (أو عندما لا نستخدم Outline)
+        P = build_article_prompt(
             keyword=keyword,
             related_keywords=related_keywords,
             length_preset=length_preset,
@@ -315,7 +432,43 @@ def generate_article(
             enable_comparison=enable_comparison,
             scenarios_count=scenarios_count,
             faq_count=faq_count,
-        )["sections"]]),
+        )
+        messages = [
+            {"role": "system", "content": P["system"]},
+            {"role": "user",   "content": P["user"]},
+        ]
+        first_pass = chat_complete(
+            messages=messages,
+            temperature=0.6,
+            max_output_tokens=3800,
+            model=model,
+        ).strip()
+        article = first_pass
+
+    # (د) توسيع تلقائي حتى بلوغ الحد الأدنى
+    article = expand_to_target(
+        article_md=article,
+        keyword=keyword,
+        related_keywords=related_keywords,
+        length_preset=length_preset,
+        model=model,
+    )
+    # محاولة ثانية نادرة عند الحاجة
+    length_min, length_max = LENGTH_TARGETS.get(length_preset, (900, 1200))
+    if _word_count(article) < length_min:
+        article = expand_to_target(
+            article_md=article,
+            keyword=keyword,
+            related_keywords=related_keywords,
+            length_preset=length_preset,
+            model=model,
+        )
+
+    # ملاحظات جودة مختصرة
+    quality_notes = {
+        "length_target": f"{length_min}-{length_max} كلمة",
+        "sections_target": "Outline مقفول" if (include_outline and enforce_outline and outline_md)
+                          else "عناوين افتراضية (بدون قفل)",
         "tone": tone,
         "outline_used": bool(include_outline and outline_md),
         "enforced_rules": [
