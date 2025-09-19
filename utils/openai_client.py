@@ -5,6 +5,7 @@
 # - قوالب Outline داخلية: modern | classic | none (outline_mode)
 # - التزام بالطول مع expand_to_target
 # - verify_and_correct_structure لمطابقة العناوين
+# - Post-processing مرن لإضافة أقسام ناقصة (أقوال المفسرين / مصادر / خاتمة مسؤولة)
 # - حقن "مصادر صريحة" من data/sources.yaml
 # - طبقة توافق max_output_tokens / max_tokens
 # =====================================================
@@ -25,7 +26,7 @@ client = OpenAI()
 # استيراد قوالب الـ Outline المضمّنة
 from utils.outline_presets import get_outline
 
-# (1) استيراد محمّل المصادر + مُنسِّق Markdown  <<< التعديل #1
+# استيراد محمّل المصادر + مُنسِّق Markdown
 from utils.sources_loader import (
     load_all_sources,
     pick_sources_for_article,
@@ -244,14 +245,14 @@ def verify_and_correct_structure(*, article_md: str, outline_md: str,
     )
     return fixed if _extract_h2_h3_titles(fixed) == target else article_md
 
-# ---------- أداة استبدال محتوى قسم H2 بعنوان محدد ----------  <<< التعديل #2
+# ---------- أداة استبدال محتوى قسم H2 بعنوان محدد ----------
 _H2_EXACT_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
 def _replace_h2_section(md: str, title_exact: str, new_body: str) -> str:
     """
     يستبدل محتوى قسم H2 المطابق تمامًا لعنوان title_exact حتى قبل H2 التالي.
     يبقي العنوان كما هو، ويضع new_body بعده بسطر.
     """
-    matches = list(_H2_EXACT_RE.finditer(md))
+    matches = list(_H2_EXACT_RE.finditer(md or ""))
     if not matches:
         return md
 
@@ -259,17 +260,97 @@ def _replace_h2_section(md: str, title_exact: str, new_body: str) -> str:
     for i, m in enumerate(matches):
         h2_title = m.group(1).strip()
         if h2_title == title_exact.strip():
-            start = m.end()  # نهاية سطر العنوان
+            start = m.end()
             end = len(md)
             if i + 1 < len(matches):
                 end = matches[i + 1].start()
-
             before = md[:start]
             after = md[end:]
             body = "\n\n" + (new_body.strip()) + "\n\n"
             out = before + body + after
             break
     return out
+
+# =====================================================
+#            Post-processing (التزام مرن)
+# =====================================================
+
+def _has_h2(md: str, title_exact: str) -> bool:
+    for m in _H2_EXACT_RE.finditer(md or ""):
+        if m.group(1).strip() == title_exact.strip():
+            return True
+    return False
+
+def _append_h2(md: str, title: str, body_md: str) -> str:
+    part = f"\n\n## {title}\n\n{body_md.strip()}\n"
+    return (md or "").rstrip() + part
+
+def _insert_h2_before(md: str, before_title_exact: str, title: str, body_md: str) -> str:
+    matches = list(_H2_EXACT_RE.finditer(md or ""))
+    if not matches:
+        return _append_h2(md, title, body_md)
+    insert_pos = len(md)
+    for i, m in enumerate(matches):
+        h2 = m.group(1).strip()
+        if h2 == before_title_exact.strip():
+            insert_pos = m.start()
+            break
+    return md[:insert_pos] + f"\n\n## {title}\n\n{body_md.strip()}\n\n" + md[insert_pos:]
+
+# قوالب آمنة موجزة
+DEF_CLASSICAL_OPINIONS = """- **ابن سيرين:** تُذكر النقود أحيانًا في باب الهمّ/الرزق تبعًا لحال الرائي وتفاصيل الرؤيا.
+- **النابلسي:** يربط بين نوع النقود وحالها (جديدة/ممزقة) ومعنى الرزق أو الانشغال.
+- **ابن شاهين:** يميل إلى تفصيل دقيق بحسب الفعل (إعطاء/أخذ/ضياع) وسياق الرائي.
+> هذه خلاصة تراثية عامّة وليست حكمًا قاطعًا؛ التفاصيل تغيّر المعنى."""
+
+DEF_RESPONSIBLE_OUTRO = """**خلاصة مسؤولة:**  
+يبقى تفسير الرمز احتماليًا ويتأثر بمشاعر الرائي وسياقه وظروفه الراهنة. خذ من المعاني ما ينسجم مع واقعك واترك ما لا ينطبق.
+
+**نصائح عملية عند القلق:**  
+- دوّن الحلم ومشاعرك قبل/أثناء/بعد الرؤيا.  
+- جرّب تهدئة قبل النوم (تنفّس عميق/أذكار/تقليل منبّهات).  
+- إن تكررت الرؤيا وأثّرت على يومك، استشر مختصًا نفسيًا/مرشدًا موثوقًا.
+
+**تنويه مهني (Disclaimer):**  
+هذا المحتوى تثقيفي، وليس نصيحة دينية أو نفسية قاطعة، ولا يُستخدم لاتخاذ قرارات مالية/صحية."""
+
+def _soft_enforce_outline(article: str) -> str:
+    """
+    يضيف الأقسام الناقصة (أقوال المفسرين / مصادر صريحة / خاتمة مسؤولة) بدون تقييد باقي البنية.
+    ترتيب الإدراج:
+      - 'أقوال المفسرين' قبل 'أسئلة شائعة' إن وُجدت، وإلا قبل 'مقارنة دقيقة'، وإلا في النهاية.
+      - 'مصادر صريحة' قبل الخاتمة إن وُجدت، وإلا في النهاية.
+      - 'خاتمة مسؤولة + تنويه مهني' في النهاية إن غابت.
+    """
+    text = article or ""
+
+    # 1) أقوال المفسرين
+    if not _has_h2(text, "أقوال المفسرين (ابن سيرين / النابلسي / ابن شاهين)"):
+        if _has_h2(text, "أسئلة شائعة"):
+            text = _insert_h2_before(text, "أسئلة شائعة",
+                                     "أقوال المفسرين (ابن سيرين / النابلسي / ابن شاهين)",
+                                     DEF_CLASSICAL_OPINIONS)
+        elif _has_h2(text, "مقارنة دقيقة"):
+            text = _insert_h2_before(text, "مقارنة دقيقة",
+                                     "أقوال المفسرين (ابن سيرين / النابلسي / ابن شاهين)",
+                                     DEF_CLASSICAL_OPINIONS)
+        else:
+            text = _append_h2(text, "أقوال المفسرين (ابن سيرين / النابلسي / ابن شاهين)",
+                              DEF_CLASSICAL_OPINIONS)
+
+    # 2) مصادر صريحة
+    if not _has_h2(text, "مصادر صريحة"):
+        if _has_h2(text, "خاتمة مسؤولة + تنويه مهني"):
+            text = _insert_h2_before(text, "خاتمة مسؤولة + تنويه مهني",
+                                     "مصادر صريحة", "_سيتم إدراج المصادر أدناه._")
+        else:
+            text = _append_h2(text, "مصادر صريحة", "_سيتم إدراج المصادر أدناه._")
+
+    # 3) خاتمة مسؤولة + تنويه
+    if not _has_h2(text, "خاتمة مسؤولة + تنويه مهني"):
+        text = _append_h2(text, "خاتمة مسؤولة + تنويه مهني", DEF_RESPONSIBLE_OUTRO)
+
+    return text
 
 # ---------- الدالة الرئيسية ----------
 def generate_article(
@@ -372,7 +453,10 @@ def generate_article(
             model=model,
         )
 
-    # (د) حقن "مصادر صريحة" من YAML إن وُجد العنوان  <<< التعديل #3
+    # (د) تطبيق التزام مرن: تأمين الأقسام الناقصة بدون تقييد العمل الإبداعي
+    article = _soft_enforce_outline(article)
+
+    # (هـ) حقن "مصادر صريحة" من YAML إن وُجد العنوان
     try:
         all_src = load_all_sources()
         picked = pick_sources_for_article(all_sources=all_src, want_count=5, mix_classical_modern=True)
