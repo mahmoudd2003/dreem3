@@ -7,6 +7,7 @@
 # - التزام بالطول مع expand_to_target
 # - verify_and_correct_structure لمطابقة العناوين
 # - Post-processing مرن لإضافة أقسام ناقصة (أقوال المفسرين / مصادر / خاتمة مسؤولة)
+# - إدراج "تعليق المحرّر" تلقائيًا (بصمة شخصية بدون توقيع)
 # - حقن "مصادر صريحة" من data/sources.yaml
 # - طبقة توافق max_output_tokens / max_tokens
 # =====================================================
@@ -40,6 +41,9 @@ from utils.section_weights import (
     format_targets_hint,
     format_cases_hint,
 )
+
+# استيراد تعليقات المحرّر (بصمة شخصية)
+from utils.editor_notes import get_editor_note_body
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
@@ -135,7 +139,7 @@ def build_article_prompt(
     if enable_comparison:     sections.append("## مقارنة دقيقة")
     if enable_methodology:    sections.append("## منهجية التفسير")
     if enable_sources:        sections.append("## مصادر صريحة")
-    if enable_editor_note:    sections.append("## تعليق محرّر")
+    if enable_editor_note:    sections.append("## تعليق المحرّر")
     sections.append("## خاتمة")
 
     system = (
@@ -267,17 +271,12 @@ def verify_and_correct_structure(*, article_md: str, outline_md: str,
     )
     return fixed if _extract_h2_h3_titles(fixed) == target else article_md
 
-# ---------- أداة استبدال محتوى قسم H2 بعنوان محدد ----------
+# ---------- أدوات عناوين H2 ----------
 _H2_EXACT_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
 def _replace_h2_section(md: str, title_exact: str, new_body: str) -> str:
-    """
-    يستبدل محتوى قسم H2 المطابق تمامًا لعنوان title_exact حتى قبل H2 التالي.
-    يبقي العنوان كما هو، ويضع new_body بعده بسطر.
-    """
     matches = list(_H2_EXACT_RE.finditer(md or ""))
     if not matches:
         return md
-
     out = md
     for i, m in enumerate(matches):
         h2_title = m.group(1).strip()
@@ -292,10 +291,6 @@ def _replace_h2_section(md: str, title_exact: str, new_body: str) -> str:
             out = before + body + after
             break
     return out
-
-# =====================================================
-#            Post-processing (التزام مرن)
-# =====================================================
 
 def _has_h2(md: str, title_exact: str) -> bool:
     for m in _H2_EXACT_RE.finditer(md or ""):
@@ -319,7 +314,7 @@ def _insert_h2_before(md: str, before_title_exact: str, title: str, body_md: str
             break
     return md[:insert_pos] + f"\n\n## {title}\n\n{body_md.strip()}\n\n" + md[insert_pos:]
 
-# قوالب آمنة موجزة
+# ---------- قوالب آمنة موجزة للأقسام ----------
 DEF_CLASSICAL_OPINIONS = """- **ابن سيرين:** تُذكر النقود أحيانًا في باب الهمّ/الرزق تبعًا لحال الرائي وتفاصيل الرؤيا.
 - **النابلسي:** يربط بين نوع النقود وحالها (جديدة/ممزقة) ومعنى الرزق أو الانشغال.
 - **ابن شاهين:** يميل إلى تفصيل دقيق بحسب الفعل (إعطاء/أخذ/ضياع) وسياق الرائي.
@@ -335,6 +330,10 @@ DEF_RESPONSIBLE_OUTRO = """**خلاصة مسؤولة:**
 
 **تنويه مهني (Disclaimer):**  
 هذا المحتوى تثقيفي، وليس نصيحة دينية أو نفسية قاطعة، ولا يُستخدم لاتخاذ قرارات مالية/صحية."""
+
+# =====================================================
+#            Post-processing (التزام مرن)
+# =====================================================
 
 def _soft_enforce_outline(article: str) -> str:
     """
@@ -372,6 +371,21 @@ def _soft_enforce_outline(article: str) -> str:
     if not _has_h2(text, "خاتمة مسؤولة + تنويه مهني"):
         text = _append_h2(text, "خاتمة مسؤولة + تنويه مهني", DEF_RESPONSIBLE_OUTRO)
 
+    return text
+
+def _ensure_editor_note(article: str) -> str:
+    """
+    يدرج قسم 'تعليق المحرّر' (إن لم يوجد) قبل 'خاتمة مسؤولة + تنويه مهني' إن أمكن، وإلا في النهاية.
+    """
+    text = article or ""
+    if _has_h2(text, "تعليق المحرّر"):
+        return text
+
+    body = get_editor_note_body().strip()
+    if _has_h2(text, "خاتمة مسؤولة + تنويه مهني"):
+        text = _insert_h2_before(text, "خاتمة مسؤولة + تنويه مهني", "تعليق المحرّر", body)
+    else:
+        text = _append_h2(text, "تعليق المحرّر", body)
     return text
 
 # ---------- الدالة الرئيسية ----------
@@ -475,10 +489,13 @@ def generate_article(
             model=model,
         )
 
-    # (د) تطبيق التزام مرن: تأمين الأقسام الناقصة بدون تقييد العمل الإبداعي
+    # (د) تطبيق التزام مرن: تأمين الأقسام الناقصة
     article = _soft_enforce_outline(article)
 
-    # (هـ) حقن "مصادر صريحة" من YAML إن وُجد العنوان
+    # (هـ) إدراج "تعليق المحرّر" (بصمة شخصية بدون توقيع)
+    article = _ensure_editor_note(article)
+
+    # (و) حقن "مصادر صريحة" من YAML إن وُجد العنوان
     try:
         all_src = load_all_sources()
         picked = pick_sources_for_article(all_sources=all_src, want_count=5, mix_classical_modern=True)
@@ -506,6 +523,7 @@ def generate_article(
             "تفكيك الرمز نفسيًا/اجتماعيًا",
             "سيناريوهات/FAQ عند التفعيل",
             "تمييز الرأي عن النقل",
+            "تعليق محرّر (بصمة شخصية)",
         ],
     }
 
