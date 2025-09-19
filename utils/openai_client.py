@@ -492,7 +492,8 @@ def generate_article(
     # (د) تطبيق التزام مرن: تأمين الأقسام الناقصة
     article = _soft_enforce_outline(article)
 
-    # (هـ) إدراج "تعليق المحرّر" (بصمة شخصية بدون توقيع)
+# (هـ) إدراج "تعليق المحرّر" (بصمة شخصية بدون توقيع) — اختياري
+if enable_editor_note:
     article = _ensure_editor_note(article)
 
     # (و) حقن "مصادر صريحة" من YAML إن وُجد العنوان
