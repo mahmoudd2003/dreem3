@@ -2,10 +2,11 @@
 # =====================================================
 # واجهة موحّدة للتعامل مع OpenAI
 # - Two-pass generation (Outline -> Article) مع خيار قفل الـ Outline
-# - قوالب Outline داخلية: modern | classic | none (عبر outline_mode)
+# - قوالب Outline داخلية: modern | classic | none (outline_mode)
 # - التزام بالطول مع expand_to_target
 # - verify_and_correct_structure لمطابقة العناوين
-# - طبقة توافق max_output_tokens/max_tokens
+# - حقن "مصادر صريحة" من data/sources.yaml
+# - طبقة توافق max_output_tokens / max_tokens
 # =====================================================
 
 from __future__ import annotations
@@ -23,6 +24,13 @@ client = OpenAI()
 
 # استيراد قوالب الـ Outline المضمّنة
 from utils.outline_presets import get_outline
+
+# (1) استيراد محمّل المصادر + مُنسِّق Markdown  <<< التعديل #1
+from utils.sources_loader import (
+    load_all_sources,
+    pick_sources_for_article,
+    format_sources_markdown,
+)
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
@@ -236,6 +244,33 @@ def verify_and_correct_structure(*, article_md: str, outline_md: str,
     )
     return fixed if _extract_h2_h3_titles(fixed) == target else article_md
 
+# ---------- أداة استبدال محتوى قسم H2 بعنوان محدد ----------  <<< التعديل #2
+_H2_EXACT_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
+def _replace_h2_section(md: str, title_exact: str, new_body: str) -> str:
+    """
+    يستبدل محتوى قسم H2 المطابق تمامًا لعنوان title_exact حتى قبل H2 التالي.
+    يبقي العنوان كما هو، ويضع new_body بعده بسطر.
+    """
+    matches = list(_H2_EXACT_RE.finditer(md))
+    if not matches:
+        return md
+
+    out = md
+    for i, m in enumerate(matches):
+        h2_title = m.group(1).strip()
+        if h2_title == title_exact.strip():
+            start = m.end()  # نهاية سطر العنوان
+            end = len(md)
+            if i + 1 < len(matches):
+                end = matches[i + 1].start()
+
+            before = md[:start]
+            after = md[end:]
+            body = "\n\n" + (new_body.strip()) + "\n\n"
+            out = before + body + after
+            break
+    return out
+
 # ---------- الدالة الرئيسية ----------
 def generate_article(
     *,
@@ -254,7 +289,7 @@ def generate_article(
     scenarios_count: int = 3,
     faq_count: int = 4,
     enforce_outline: bool = False,
-    outline_mode: str = "modern",     # <<< جديد: "modern" | "classic" | "none"
+    outline_mode: str = "modern",     # "modern" | "classic" | "none"
     model: str = MODEL_NAME,
 ) -> Dict[str, Any]:
 
@@ -318,7 +353,7 @@ def generate_article(
             model=model,
         )
 
-    # (ج) توسيع للطول المستهدف
+    # (ج) توسيع للطول المستهدف (إن لزم)
     article = expand_to_target(
         article_md=article,
         keyword=keyword,
@@ -336,6 +371,21 @@ def generate_article(
             length_preset=length_preset,
             model=model,
         )
+
+    # (د) حقن "مصادر صريحة" من YAML إن وُجد العنوان  <<< التعديل #3
+    try:
+        all_src = load_all_sources()
+        picked = pick_sources_for_article(all_sources=all_src, want_count=5, mix_classical_modern=True)
+        src_md = format_sources_markdown(picked) if picked else ""
+        if src_md:
+            article = _replace_h2_section(
+                article,
+                title_exact="مصادر صريحة",
+                new_body=src_md
+            )
+    except Exception:
+        # نتجاهل أي خطأ في المصادر كي لا يعطل توليد المقال
+        pass
 
     quality_notes = {
         "length_target": f"{length_min}-{length_max} كلمة",
