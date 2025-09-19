@@ -2,7 +2,7 @@
 # ===========================
 # واجهة Streamlit لنظام كتابة مقالات تفسير الأحلام
 # يعتمد على:
-# - utils/openai_client.py    (generate_article + build_article_prompt)
+# - utils/openai_client.py    (generate_article + Two-pass + enforce_outline)
 # - utils/exporters.py        (تصدير Markdown/DOCX/JSON)
 # - utils/quality_checks.py   (تقرير الجودة التفصيلي)
 # - utils/meta_generator.py   (مولّد الميتا الذكي)
@@ -37,7 +37,7 @@ st.set_page_config(
 st.title("📝 نظام كتابة مقالات تفسير الأحلام")
 st.markdown(
     "أدخل الكلمة المفتاحية والكلمات المرتبطة، واختر طول المقال. "
-    "يمكنك أيضًا تفعيل إنشاء Outline قبل الكتابة."
+    "يمكنك أيضًا تفعيل إنشاء Outline قبل الكتابة وقفل الالتزام به حرفيًا."
 )
 
 # ===== إدخالات المستخدم =====
@@ -56,7 +56,11 @@ length_option_label = st.radio(
 
 tone = st.selectbox("🎙️ النبرة", ["هادئة", "قصصية", "تحليلية"])
 
-include_outline = st.toggle("📐 إنشاء Outline قبل كتابة المقال", value=False)
+col_outline_a, col_outline_b = st.columns(2)
+with col_outline_a:
+    include_outline = st.toggle("📐 إنشاء Outline قبل كتابة المقال", value=False)
+with col_outline_b:
+    enforce_outline = st.checkbox("🔒 استخدم الـ Outline حرفيًا (إن وُجد)", value=True)
 
 # مخزون الروابط الداخلية (اختياري)
 st.markdown("### 🧭 مخزون الروابط الداخلية (اختياري)")
@@ -142,6 +146,7 @@ if st.button("🚀 إنشاء المقال"):
                 enable_comparison=enable_comparison,
                 scenarios_count=scenarios_count,
                 faq_count=faq_count,
+                enforce_outline=enforce_outline,   # <<< الجديد
             )
         except Exception as e:
             st.error(f"حدث خطأ أثناء التوليد: {e}")
@@ -160,6 +165,8 @@ if st.button("🚀 إنشاء المقال"):
     st.session_state["keyword"] = keyword.strip()
     st.session_state["related_keywords"] = related_keywords
     st.session_state["tone"] = tone
+    st.session_state["scenarios_count"] = scenarios_count
+    st.session_state["faq_count"] = faq_count
 
 # ===== العرض =====
 if st.session_state["result"]:
@@ -197,7 +204,7 @@ if st.session_state["result"]:
         st.subheader("✅ Quality Gates (مختصر)")
         qn = result.get("quality_notes", {})
         st.write(f"- **الطول المستهدف:** {qn.get('length_target')}")
-        st.write(f"- **عدد الأقسام المستهدف:** {qn.get('sections_target')}")
+        st.write(f"- **البنية:** {qn.get('sections_target')}")
         st.write(f"- **النبرة:** {qn.get('tone')}")
         st.write(f"- **Outline مُستخدم؟** {'نعم' if qn.get('outline_used') else 'لا'}")
         st.write("**قواعد مُطبّقة:**")
@@ -459,14 +466,14 @@ if st.session_state["result"]:
                 st.session_state["result"] = result
 
             st.success("✅ تم تطبيق الدفعة المُحسّنة.")
-            rep = fx["reports"]
+            rep2 = fx["reports"]
             st.write("**ملخص الدفعة المُحسّنة:**")
             st.write(
-                f"- تنظيف: حذف/قص الحشو = {rep['clean']['filler_removed']} | تكرار ترقيم = {rep['clean']['repeated_punct_collapsed']} | فواصل عربية = {rep['clean']['arabic_comma_applied']}\n"
-                f"- Normalize: H1→H2 = {rep['headings']['h1_to_h2']} | H4+→H3 = {rep['headings']['h4plus_to_h3']} | حذف مكرر = {rep['headings']['deduped_headings']} | ترقيم تلقائي = {rep['headings']['autonumbered']}\n"
-                f"- تقليل الجزم: استبدالات = {rep['soften']['replacements_count']}\n"
-                f"- إدراج 'متى لا ينطبق؟': {'تم' if rep['not_applicable_inserted'] else 'كان موجودًا'}\n"
-                f"- خاتمة مسؤولة: {'تمت' if rep['outro_regenerated'] else 'تخطّينا/تعذّر'}"
+                f"- تنظيف: حذف/قص الحشو = {rep2['clean']['filler_removed']} | تكرار ترقيم = {rep2['clean']['repeated_punct_collapsed']} | فواصل عربية = {rep2['clean']['arabic_comma_applied']}\n"
+                f"- Normalize: H1→H2 = {rep2['headings']['h1_to_h2']} | H4+→H3 = {rep2['headings']['h4plus_to_h3']} | حذف مكرر = {rep2['headings']['deduped_headings']} | ترقيم تلقائي = {rep2['headings']['autonumbered']}\n"
+                f"- تقليل الجزم: استبدالات = {rep2['soften']['replacements_count']}\n"
+                f"- إدراج 'متى لا ينطبق؟': {'تم' if rep2['not_applicable_inserted'] else 'كان موجودًا'}\n"
+                f"- خاتمة مسؤولة: {'تمت' if rep2['outro_regenerated'] else 'تخطّينا/تعذّر'}"
             )
             st.markdown("**المقال بعد الدفعة المُحسّنة:**")
             st.markdown(result["article"])
@@ -536,84 +543,90 @@ if st.session_state["result"]:
 
         # أزرار سريعة
         quick_defs = [
-            ("افتتاحية", "intro",  None),
-            ("لماذا قد يظهر الرمز؟", "why", None),
-            ("متى لا ينطبق التفسير؟", "not_applicable", None),
-            ("سيناريوهات واقعية", "scenarios", st.session_state.get("scenarios_count", 3) if 'scenarios_count' in st.session_state else 3),
-            ("أسئلة شائعة", "faq", st.session_state.get("faq_count", 4) if 'faq_count' in st.session_state else 4),
-            ("مقارنة دقيقة", "comparison", None),
-            ("منهجية التفسير", "methodology", None),
-            ("خاتمة", "outro", None),
+            ("افتتاحية", "intro",  None, [r"افتتاحية"]),
+            ("لماذا قد يظهر الرمز؟", "why", None, [r"لماذا\s+قد\s+يظهر\s+الرمز\؟?"]),
+            ("متى لا ينطبق التفسير؟", "not_applicable", None, [r"متى\s+لا\s+ينطبق\s+التفسير\؟?"]),
+            ("سيناريوهات واقعية", "scenarios", st.session_state.get("scenarios_count", 3), [r"سيناريوهات\s+واقعية"]),
+            ("أسئلة شائعة", "faq", st.session_state.get("faq_count", 4), [r"أسئلة\s+شائعة"]),
+            ("مقارنة دقيقة", "comparison", None, [r"مقارنة\s+دقيقة"]),
+            ("منهجية التفسير", "methodology", None, [r"منهجية\s+التفسير"]),
+            ("خاتمة", "outro", None, [r"خاتمة", r"الخلاصة"]),
         ]
-
-        def find_title_by_hint(hints):
-            for t in titles:
-                for h in hints:
-                    if re.fullmatch(h, t):
-                        return t
-            return None
 
         st.write("**أزرار سريعة:**")
         cols = st.columns(4)
-        btn_idx = 0
-        for display, sec_type, target_count in quick_defs:
-            hint_patterns = {
-                "intro":        [r"افتتاحية"],
-                "why":          [r"لماذا\s+قد\s+يظهر\s+الرمز\؟?"],
-                "not_applicable":[r"متى\s+لا\s+ينطبق\s+التفسير\؟?"],
-                "scenarios":    [r"سيناريوهات\s+واقعية"],
-                "faq":          [r"أسئلة\s+شائعة"],
-                "comparison":   [r"مقارنة\s+دقيقة"],
-                "methodology":  [r"منهجية\s+التفسير"],
-                "outro":        [r"خاتمة"],
-            }.get(sec_type, [re.escape(display)])
-
-            sec_title = find_title_by_hint(hint_patterns)
-            if sec_title:
-                with cols[btn_idx % 4]:
-                    if st.button(f"🔁 {display}"):
-                        with st.spinner(f"إعادة توليد: {display}…"):
+        for i, (label, sec_type, target_count, patterns) in enumerate(quick_defs):
+            col = cols[i % 4]
+            with col:
+                if st.button(label):
+                    # البحث عن العنوان المطابق
+                    picked_title = None
+                    for t in titles:
+                        for pat in patterns:
+                            if re.fullmatch(pat, t):
+                                picked_title = t
+                                break
+                        if picked_title:
+                            break
+                    if not picked_title:
+                        st.warning(f"لم يتم العثور على قسم بعنوان «{label}».")
+                    else:
+                        with st.spinner(f"إعادة توليد قسم: {picked_title} …"):
                             try:
                                 new_article = regenerate_section(
                                     article_md=result["article"],
-                                    section_title=sec_title,
-                                    keyword=st.session_state["keyword"],
-                                    related_keywords=st.session_state["related_keywords"],
-                                    tone=st.session_state["tone"],
+                                    section_title=picked_title,
+                                    keyword=st.session_state.get("keyword", ""),
+                                    related_keywords=st.session_state.get("related_keywords", []),
+                                    tone=st.session_state.get("tone", "هادئة"),
                                     section_type=sec_type,
-                                    target_count=target_count,
+                                    # تم تمرير target_count لِـfaq/scenarios تلقائيًا داخل الدالة (إن كانت تدعمه)
                                 )
                                 result["article"] = new_article
                                 st.session_state["result"] = result
-                                st.success(f"✅ تم تحديث قسم «{display}».")
-                                st.markdown(new_article)
+                                st.success(f"تم تحديث قسم «{picked_title}».")
                             except Exception as e:
                                 st.error(f"تعذّرت إعادة توليد القسم: {e}")
-                btn_idx += 1
 
-        st.markdown("**أو اختر يدويًا:**")
-        selected = st.selectbox("اختر قسمًا لإعادة توليده:", titles, index=0)
-        if selected:
-            preview = extract_section_text(result["article"], selected)
-            with st.expander("معاينة القسم الحالي"):
-                st.markdown(preview)
+        st.markdown("— أو —")
 
-            st.caption("يمكنك استخدام الأزرار السريعة بالأعلى للأقسام الشائعة.")
-            if st.button("🔁 إعادة توليد القسم المحدد"):
-                with st.spinner("يعاد توليد القسم المحدد…"):
-                    try:
-                        new_article = regenerate_section(
-                            article_md=result["article"],
-                            section_title=selected,
-                            keyword=st.session_state["keyword"],
-                            related_keywords=st.session_state["related_keywords"],
-                            tone=st.session_state["tone"],
-                        )
-                        result["article"] = new_article
-                        st.session_state["result"] = result
-                        st.success("✅ تم تحديث القسم بنجاح.")
-                        st.markdown(new_article)
-                    except Exception as e:
-                        st.error(f"تعذّرت إعادة توليد القسم: {e}")
+        # اختيار يدوي
+        manual_title = st.selectbox("اختر عنوان قسم لإعادة توليده:", titles)
+        manual_type = st.selectbox(
+            "نوع القسم (يساعد النموذج على التوليد الأنسب):",
+            ["intro", "why", "not_applicable", "scenarios", "faq", "comparison", "methodology", "outro"],
+            index=0
+        )
+        manual_extra = ""
+        if manual_type in ("scenarios", "faq"):
+            manual_extra = st.text_input("بارامترات إضافية (اختياري): عدد العناصر (مثال: 3)")
 
-    st.success("✅ المقال جاهز — أنشئ، نظّف، طبّع العناوين، طبّق الدفعات، افحص الجودة، اقترح روابط، قِس التنوع، وعدّل الأقسام كما تشاء.")
+        if st.button("🔁 أعد توليد القسم المحدد"):
+            with st.spinner("يتم إعادة توليد القسم..."):
+                try:
+                    # تمرير العدد إن أُدخل
+                    extra_kwargs = {}
+                    if manual_type in ("scenarios", "faq"):
+                        try:
+                            n = int(manual_extra.strip()) if manual_extra.strip() else None
+                            if n:
+                                extra_kwargs["target_count"] = n
+                        except Exception:
+                            pass
+
+                    updated = regenerate_section(
+                        article_md=result["article"],
+                        section_title=manual_title,
+                        keyword=st.session_state.get("keyword", ""),
+                        related_keywords=st.session_state.get("related_keywords", []),
+                        tone=st.session_state.get("tone", "هادئة"),
+                        section_type=manual_type,
+                        **extra_kwargs
+                    )
+                    result["article"] = updated
+                    st.session_state["result"] = result
+                    st.success("✅ تم تحديث القسم بنجاح.")
+                    st.markdown("**المقال بعد التعديل:**")
+                    st.markdown(result["article"])
+                except Exception as e:
+                    st.error(f"حدث خطأ: {e}")
