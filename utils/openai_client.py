@@ -2,7 +2,7 @@
 # =====================================================
 # واجهة موحّدة للتعامل مع OpenAI
 # - Two-pass generation (Outline -> Article) مع خيار قفل الـ Outline
-# - قوالب Outline داخلية: modern | classic | none
+# - قوالب Outline داخلية: modern | classic | none (عبر outline_mode)
 # - التزام بالطول مع expand_to_target
 # - verify_and_correct_structure لمطابقة العناوين
 # - طبقة توافق max_output_tokens/max_tokens
@@ -21,7 +21,7 @@ except Exception:
 
 client = OpenAI()
 
-# استيراد القوالب
+# استيراد قوالب الـ Outline المضمّنة
 from utils.outline_presets import get_outline
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4.1")
@@ -70,6 +70,10 @@ def chat_complete(
     max_output_tokens: int = 3800,
     model: str = MODEL_NAME,
 ) -> str:
+    """
+    طبقة توافق: بعض إصدارات بايثون-OpenAI تستخدم max_output_tokens
+    وأخرى تستخدم max_tokens. نجرب الأولى ثم نسقط للثانية.
+    """
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -264,9 +268,6 @@ def generate_article(
         outline_md = internal_outline
         include_outline = True
         enforce_outline = True
-    else:
-        # إبقاء السلوك السابق (Outline حر عند الحاجة)
-        pass
 
     # (أ) الكتابة من Outline مقفول
     if include_outline and enforce_outline and outline_md:
